@@ -1,0 +1,422 @@
+name: Build Kernel SUKISU (OnePlus Ace 3V)
+
+on:
+  workflow_dispatch:
+    inputs:
+      KERNEL_NAME:
+        description: '自定义内核名称'
+        required: false
+        default: 'android14-11-o-yuhangKernel'
+      CUSTOM_NAME_ENABLED:
+        description: '是否启用自定义内核名 (禁用此选项将不添加内核名后缀)'
+        required: true
+        default: false
+        type: boolean
+      USE_FAKE_TIME:
+        description: '是否伪造构建时间 (true/false)'
+        required: true
+        default: false
+        type: boolean
+      FAKE_TIME_VAL:
+        description: '伪造的时间戳 (仅当启用伪造时间时生效)'
+        required: false
+        default: 'Mon Dec 15 12:34:59 UTC 2025'
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    
+    env:
+      # CCACHE 配置 (4G 安全限制)
+      CCACHE_DIR: ${{ github.workspace }}/.ccache_dir
+      CCACHE_MAXSIZE: 4G 
+      CCACHE_NOHASHDIR: 'true'
+      CCACHE_HARDLINK: 'true'
+      CCACHE_COMPILERCHECK: '%compiler% -dumpmachine; %compiler% -dumpversion'
+
+    steps:
+    - name: Maximize build space
+      uses: easimon/maximize-build-space@master
+      with:
+        root-reserve-mb: 8192
+        temp-reserve-mb: 2048
+        remove-dotnet: 'true'
+        remove-android: 'true'
+        remove-haskell: 'true'
+        remove-codeql: 'true'
+        
+    - name: Checkout Workflow
+      uses: actions/checkout@v4
+
+    - name: Create and Enable 4G Swap
+      run: |
+        sudo swapoff -a
+        sudo fallocate -l 4G /swapfile
+        sudo chmod 600 /swapfile
+        sudo mkswap /swapfile
+        sudo swapon /swapfile
+        free -h
+
+    - name: Install Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libelf-dev libssl-dev flex bison cpio dwarves bc ccache
+        sudo apt-get install -y git gnupg gperf build-essential zip curl zlib1g-dev gcc-multilib g++-multilib lib32ncurses5-dev x11proto-core-dev libx11-dev lib32z1-dev libgl1-mesa-dev unzip python3 python3-pip
+        
+        git config --global user.name "GitHub Action"
+        git config --global user.email "action@github.com"
+
+    - name: Restore Ccache (Skipping Save)
+      uses: actions/cache@v4
+      with:
+        path: ${{ env.CCACHE_DIR }}
+        # 修复后的 Key 定义，直接在 step 中引用 ${{ runner.os }} 和 ${{ hashFiles(...) }}
+        key: ccache-${{ runner.os }}-${{ hashFiles('kernel_workspace/kernel_platform/common/build.config*') }}-v2-${{ github.event.inputs.KERNEL_NAME }}
+        restore-keys: |
+          ccache-${{ runner.os }}-${{ hashFiles('kernel_workspace/kernel_platform/common/build.config*') }}-v2-
+          ccache-${{ runner.os }}-
+
+    - name: Initialize Ccache
+      run: |
+        if command -v ccache >/dev/null 2>&1; then
+          echo "CCACHE 目录: ${{ env.CCACHE_DIR }}"
+          mkdir -p "${{ env.CCACHE_DIR }}"
+          ccache -M ${{ env.CCACHE_MAXSIZE }}
+          echo "✅ ccache 初始化完成"
+        else
+          echo "❌ 未安装 ccache，跳过"
+        fi
+        ccache -s
+
+    - name: Install Repo Tool
+      run: |
+        mkdir -p ~/bin
+        curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+        chmod a+x ~/bin/repo
+        echo "$HOME/bin" >> $GITHUB_PATH
+
+
+    - name: Cache Kernel Source
+      id: cache-kernel
+      uses: actions/cache@v4
+      with:
+        path: ${{ github.workspace }}/kernel_workspace
+        key: kernel-source-oneplus-sm7675
+
+    - name: ⬇️ Download Google Clang Toolchain
+      # 步骤1：创建目录
+      run: |
+        # 在 kernel_workspace 中创建 build-tools/clang 文件夹
+        mkdir -p $GITHUB_WORKSPACE/kernel_workspace/build-tools/clang
+        echo "Created directory: $GITHUB_WORKSPACE/kernel_workspace/build-tools/clang"
+
+        # 进入新创建的目录
+        cd $GITHUB_WORKSPACE/kernel_workspace/build-tools/clang
+        
+        # 步骤2：克隆/下载 Clang 工具链
+        
+        CLANG_REPO="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86"
+        CLANG_REF="android-gs-akita-6.1-android16-dp"
+        
+        # 克隆仓库到临时目录
+        echo "Cloning Clang repo from $CLANG_REPO at ref $CLANG_REF"
+        git clone --depth 1 $CLANG_REPO -b $CLANG_REF temp_clang_repo
+        
+        # 将所需的工具链目录移动到正确位置
+        CLANG_BASE_PATH="$GITHUB_WORKSPACE/kernel_workspace/build-tools/clang/temp_clang_repo"
+        CLANG_DIR_NAME=$(find $CLANG_BASE_PATH -maxdepth 1 -type d -name "clang-r*" -exec basename {} \; | head -n 1)
+        
+        if [[ -z "$CLANG_DIR_NAME" ]]; then
+            echo "ERROR: Clang directory (clang-r*) not found in the downloaded repository."
+            exit 1
+        fi
+        
+        mv $CLANG_BASE_PATH/$CLANG_DIR_NAME . # 移动到 kernel_workspace/build-tools/clang/ 下
+        
+        # 清理临时克隆的仓库
+        rm -rf temp_clang_repo
+        echo "✅ Clang toolchain $CLANG_DIR_NAME downloaded and moved."
+        
+        # 步骤3：设置 CLANG_PATH 环境变量
+        CLANG_TOOLCHAIN_DIR="$GITHUB_WORKSPACE/kernel_workspace/build-tools/clang/$CLANG_DIR_NAME"
+        echo "CLANG_PATH=$CLANG_TOOLCHAIN_DIR/bin" >> $GITHUB_ENV
+        echo "✅ Set CLANG_PATH environment variable."
+        CLANG_PATH=$CLANG_TOOLCHAIN_DIR/bin
+        $CLANG_PATH/clang --version
+
+    - name: Initialize & Sync Kernel Source
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace
+        
+        # 检查缓存是否命中
+        if [[ "${{ steps.cache-kernel.outputs.cache-hit }}" != "true" ]]; then
+          echo "[*] 缓存未命中，开始使用 Git 初始化并同步源码..."
+          
+          # 1. 创建 kernel_platform 目录
+          mkdir kernel_platform
+          cd kernel_platform
+          
+          # 2. 拉取 msm-kernel 仓库
+          echo "[*] 克隆 msm-kernel 仓库..."
+          mkdir msm-kernel
+          cd msm-kernel
+          git init
+          git remote add origin https://github.com/OnePlusOSS/android_kernel_oneplus_sm7675
+          git fetch --depth=1 origin oneplus/sm7675_b_16.0.0_ace_3v
+          git checkout FETCH_HEAD
+          cd .. # 回到 kernel_platform
+          
+          # 3. 拉取 common 仓库
+          echo "[*] 克隆 common 仓库..."
+          mkdir common
+          cd common
+          git init
+          git remote add origin https://github.com/OnePlusOSS/android_kernel_common_oneplus_sm7675
+          git fetch --depth=1 origin oneplus/sm7675_b_16.0.0_ace_3v
+          git checkout FETCH_HEAD
+          cd .. # 回到 kernel_platform
+          
+          cd .. # 回到 kernel_workspace
+          
+          # 4. 拉取 modules/devicetree 仓库，并同步到 workspace
+          echo "[*] 克隆 modules/devicetree 仓库并同步文件..."
+          mkdir tmp
+          cd tmp
+          git init
+          git remote add origin https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm7675
+          git fetch --depth=1 origin oneplus/sm7675_b_16.0.0_ace_3v
+          git checkout FETCH_HEAD
+          
+          # 将 tmp 目录下的 kernel_platform 和 vendor 文件夹同步到 kernel_workspace 根目录
+          rsync -a ./kernel_platform/ ../kernel_platform/
+          mv ./vendor ../
+          
+          cd .. # 回到 kernel_workspace
+          rm -rf tmp # 清理临时目录
+          
+          echo "[*] 源码同步完成！"
+        else
+          echo "[*] 源码缓存命中，跳过初始化和同步。"
+        fi
+        
+    - name: Run Build Script (SUKISU Logic)
+      env:
+        KERNEL_NAME: ${{ inputs.KERNEL_NAME }}
+        CUSTOM_NAME_ENABLED: ${{ inputs.CUSTOM_NAME_ENABLED }}
+        USE_FAKE_TIME: ${{ inputs.USE_FAKE_TIME }}
+        KBUILD_BUILD_TIMESTAMP: ${{ inputs.FAKE_TIME_VAL }}
+        # Kernel 配置参数
+        CPU: 'sm7675'
+        FEIL: 'oneplus_ace3_v_v'
+        CPUD: 'pineapple'
+        ANDROID_VERSION: 'android14'
+        KERNEL_VERSION: '6.1'
+        CROSS_COMPILE: aarch64-linux-gnu-
+        CROSS_COMPILE_COMPAT: arm-linux-gnueabi-
+        android_release: android14
+        kmi_generation: 11
+
+      run: |
+        # 1. 验证 Clang 路径
+        if [[ -z "$CLANG_PATH" ]]; then
+            echo "FATAL ERROR: CLANG_PATH environment variable not set. Build cannot proceed."
+            exit 1
+        fi
+        
+        echo "✅ Detected Clang path: $CLANG_PATH"
+        
+        # 2. PATH 环境变量设定
+        export PATH="/usr/lib/ccache:$CLANG_PATH:$PATH"
+        
+        # 3. 进入源码目录
+        cd $GITHUB_WORKSPACE/kernel_workspace
+        
+        # 构建时间处理
+        if [[ "$USE_FAKE_TIME" != "true" ]]; then
+            unset KBUILD_BUILD_TIMESTAMP
+        else
+            export KBUILD_BUILD_TIMESTAMP
+        fi
+        
+        # ------------------------------
+        # 清理 & 修改 setlocalversion
+        # ------------------------------
+        rm kernel_platform/common/android/abi_gki_protected_exports_* 2>/dev/null || true
+        rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* 2>/dev/null || true
+
+        cd kernel_platform
+        for dir in common msm-kernel external/dtc; do
+            if [[ -f "$dir/scripts/setlocalversion" ]]; then
+                sed -i 's/ -dirty//g' "$dir/scripts/setlocalversion"
+                sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' "$dir/scripts/setlocalversion"
+            fi
+        done
+
+        # 只有在启用自定义名称时才添加后缀
+        if [[ "$CUSTOM_NAME_ENABLED" == "true" ]] && [[ -n "$KERNEL_NAME" ]]; then
+            sed -i "\$s|echo \"\$res\"|echo \"-$KERNEL_NAME\"|" common/scripts/setlocalversion
+        fi
+        cd ..
+
+        # ------------------------------
+        # 集成 ReSukiSU
+        # ------------------------------
+        cd kernel_platform
+        curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s builtin
+
+        # 提取 KSU 版本号并导出到环境变量
+        cd KernelSU
+        KSU_VERSION=$(( $(git rev-list --count main) + 30700 ))
+        echo "KSU_VERSION=$KSU_VERSION" >> $GITHUB_ENV
+        cd ../..
+
+        # ------------------------------
+        # 应用 SukiSU_patch
+        # ------------------------------
+        git clone https://github.com/ShirkNeko/SukiSU_patch.git
+        
+        cd kernel_platform
+        cp -r ../SukiSU_patch/other/zram/lz4k/include/linux/* ./common/include/linux/
+        cp -r ../SukiSU_patch/other/zram/lz4k/lib/* ./common/lib/
+        cp -r ../SukiSU_patch/other/zram/lz4k/crypto/* ./common/crypto/
+        cp -r ../SukiSU_patch/other/zram/lz4k_oplus ./common/lib/
+        
+        cd common
+
+        # 打通用钩子补丁
+        curl -LSs "https://raw.githubusercontent.com/yuhangle/Action_OneplusAce3v_SukiSU/master/patch/ksu_hooks.patch" -o ksu_hooks.patch
+        patch -p1 < ksu_hooks.patch || true
+
+        cp ../../SukiSU_patch/69_hide_stuff.patch ./
+        patch -p1 -F 3 < 69_hide_stuff.patch || true
+        
+        cp ../../SukiSU_patch/other/zram/zram_patch/$KERNEL_VERSION/lz4kd.patch ./
+        patch -p1 -F 3 < lz4kd.patch || true
+        cd ..
+
+        # ------------------------------
+        # 配置 defconfig
+        # ------------------------------
+        cd common
+        cat >> ./arch/arm64/configs/gki_defconfig <<EOF
+        CONFIG_KSU=y
+        CONFIG_KSU_MANUAL_HOOK=y
+        CONFIG_TMPFS_XATTR=y
+        CONFIG_TMPFS_POSIX_ACL=y
+        CONFIG_FHANDLE=y
+        CONFIG_KPM=y
+        EOF
+
+        cat >> ./arch/arm64/configs/gki_defconfig <<EOF
+        CONFIG_ZSMALLOC=y
+        CONFIG_ZRAM=m
+        CONFIG_ZRAM_WRITEBACK=y
+        CONFIG_MODULE_SIG_FORCE=n
+        CONFIG_CRYPTO_LZ4HC=y
+        CONFIG_CRYPTO_LZ4K=y
+        CONFIG_CRYPTO_LZ4KD=y
+        CONFIG_CRYPTO_LZ4K_OPLUS=n
+        CONFIG_DEFAULT_BBR=y
+        CONFIG_TCP_CONG_ADVANCED=y
+        CONFIG_TCP_CONG_BBR=y
+        CONFIG_NET_SCH_FQ=y
+        CONFIG_TCP_CONG_BIC=n
+        CONFIG_TCP_CONG_WESTWOOD=n
+        CONFIG_TCP_CONG_HTCP=n
+        EOF
+
+        # 补全官方内核配置
+        cat >> ./arch/arm64/configs/gki_defconfig <<EOF
+        CONFIG_STACKPROTECTOR=y
+        CONFIG_STACKPROTECTOR_PER_TASK=y
+
+        CONFIG_PREEMPTION=y
+        CONFIG_PREEMPT_COUNT=y
+        CONFIG_PREEMPT_BUILD=y
+        CONFIG_PREEMPT_DYNAMIC=y
+        CONFIG_SCHED_HRTICK=y
+        CONFIG_PER_VMA_LOCK=y
+
+        CONFIG_F2FS_FS_DEDUP=y
+        CONFIG_F2FS_APPBOOST=y
+        CONFIG_OVERLAY_FS_REDIRECT_ALWAYS_FOLLOW=y
+
+        CONFIG_SCSI_UFS_VARIABLE_SG_ENTRY_SIZE=y
+
+        CONFIG_NF_CONNTRACK_MARK=y
+        CONFIG_NF_NAT=y
+        CONFIG_NF_NAT_MASQUERADE=y
+
+        CONFIG_ARM64_PTR_AUTH=y
+        CONFIG_ARM64_PTR_AUTH_KERNEL=y
+        CONFIG_ARM64_MTE=y
+        CONFIG_ARM64_SVE=y
+        CONFIG_ARM64_E0PD=y
+        CONFIG_CC_HAS_BRANCH_PROT_PAC_RET_BTI=y
+
+        CONFIG_THP_SWAP=y
+        EOF
+
+        cd ..
+
+        echo "CONFIG_ZSMALLOC=y" >> "msm-kernel/arch/arm64/configs/$CPUD-GKI.config"
+        echo "CONFIG_ZRAM=m" >> "msm-kernel/arch/arm64/configs/$CPUD-GKI.config"
+
+        sed -i 's/"drivers\/block\/zram\/zram\.ko",//g; s/"mm\/zsmalloc\.ko",//g' "./common/modules.bzl"
+        sed -i 's/"drivers\/block\/zram\/zram\.ko",//g; s/"mm\/zsmalloc\.ko",//g' "./msm-kernel/modules.bzl"
+        sed -i '/^_ARM64_GKI_MODULES_LIST = \[/a \    "lib/zstdn/crypto_zstdn.ko",' "./common/modules.bzl"
+        sed -i 's/check_defconfig//' ./common/build.config.gki
+
+        cd common
+        echo "CONFIG_BBG=y" >> ./arch/arm64/configs/gki_defconfig
+        wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash || true
+        cd ..
+
+        sed -i "/stable_scmversion_cmd/s/-maybe-dirty//g" ./build/kernel/kleaf/impl/stamp.bzl
+
+        # ------------------------------
+        # 开始编译
+        # ------------------------------
+        echo "[*] 开始配置..."
+        cd common
+        
+        make LLVM=1 LLVM_IAS=1 ARCH=arm64 CC=clang HOSTCC=clang HOSTCXX=clang++ O=out gki_defconfig
+        
+        scripts/config --file out/.config -e LTO_CLANG -d LTO_NONE -e LTO_CLANG_THIN -d LTO_CLANG_FULL -e THINLTO -d ARM64_BTI_KERNEL
+        scripts/config --file out/.config --set-str CONFIG_LSM "lockdown,baseband_guard,yama,selinux"
+
+        echo "[*] 正在编译 (启用 CCACHE 和 SWAP)..."
+        make LLVM=1 LLVM_IAS=1 ARCH=arm64 CC=clang HOSTCC=clang HOSTCXX=clang++ O=out LOCALVERSION=-$android_release-$kmi_generation -j$(nproc --all)
+        
+        ccache -s
+
+    - name: Pack Kernel (Prepare for Upload)
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace
+        
+        IMAGE_PATH="kernel_platform/common/out/arch/arm64/boot/Image"
+        if [[ ! -f "$IMAGE_PATH" ]]; then
+            echo "Error: Kernel Image not found at $IMAGE_PATH"
+            exit 1
+        fi
+        
+        echo "[*] Image found. Copying to AnyKernel3..."
+        
+        AK3_DIR="SukiSU_patch/AnyKernel3"
+        if [[ ! -d "$AK3_DIR" ]]; then
+            echo "Error: SukiSU_patch/AnyKernel3 directory not found!"
+            exit 1
+        fi
+        
+        cp "$IMAGE_PATH" "$AK3_DIR/"
+        
+        # 导出 AnyKernel3 目录路径
+        echo "AK3_UPLOAD_PATH=$GITHUB_WORKSPACE/kernel_workspace/$AK3_DIR" >> $GITHUB_ENV
+        echo "[*] Ready to upload raw AnyKernel3 directory."
+
+    - name: Upload Artifact (Simple Naming & Auto Zip)
+      uses: actions/upload-artifact@v4
+      with:
+        name: Anykernel3-${{ env.KERNEL_VERSION }}-SukiSU-${{ env.KSU_VERSION }}
+        # 直接上传 AnyKernel3 目录，让 Action 自动压缩成 ZIP
+        path: ${{ env.AK3_UPLOAD_PATH }}
