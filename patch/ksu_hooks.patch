@@ -57,7 +57,7 @@ index 026a4047c..c68f8b357 100644
  }
  
 diff --git a/fs/stat.c b/fs/stat.c
-index ef50573c7..9a7a202cf 100644
+index ef50573c7..1e2b5c812 100644
 --- a/fs/stat.c
 +++ b/fs/stat.c
 @@ -427,6 +427,17 @@ SYSCALL_DEFINE2(newlstat, const char __user *, filename,
@@ -115,8 +115,8 @@ index ef50573c7..9a7a202cf 100644
  	struct kstat stat;
  	int error;
  
-+	#ifdef CONFIG_KSU_MANUAL_HOOK
-+	ksu_handle_newfstat_ret(&fd, &statbuf);
++	#ifdef CONFIG_KSU_MANUAL_HOOK // 32-bit su
++	ksu_handle_stat(&dfd, &filename, &flag); 
 +	#endif
  	error = vfs_fstatat(dfd, filename, &stat, flag);
  	if (error)
