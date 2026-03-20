@@ -1,4 +1,4 @@
-name: Build Kernel SUKISU (OnePlus Ace 3V) with crdroid sm8650
+name: Build Kernel RESUKISU with crdroid sm8650 (OnePlus Ace 3V)
 
 on:
   workflow_dispatch:
@@ -20,7 +20,12 @@ on:
       FAKE_TIME_VAL:
         description: '伪造的时间戳 (仅当启用伪造时间时生效)'
         required: false
-        default: 'Mon Dec 15 12:34:59 UTC 2025'
+        default: 'Sun Mar 1 00:00:00 UTC 2026'
+      ENABLE_SUSFS:
+        description: '是否启用susfs (true/false)'
+        required: true
+        default: false
+        type: boolean
 
 jobs:
   build:
@@ -274,32 +279,67 @@ jobs:
         # ------------------------------
         git clone https://github.com/ShirkNeko/SukiSU_patch.git
         
-        cd kernel_platform
-        cp -r ../SukiSU_patch/other/zram/lz4k/include/linux/* ./common/include/linux/
-        cp -r ../SukiSU_patch/other/zram/lz4k/lib/* ./common/lib/
-        cp -r ../SukiSU_patch/other/zram/lz4k/crypto/* ./common/crypto/
-        cp -r ../SukiSU_patch/other/zram/lz4k_oplus ./common/lib/
-        
-        cd common
+        cd kernel_platform/common
 
-        # 打通用钩子补丁
-        curl -LSs "https://raw.githubusercontent.com/yuhangle/Action_OneplusAce3v_SukiSU/master/patch/ksu_hooks.patch" -o ksu_hooks.patch
-        patch -p1 < ksu_hooks.patch || true
+        # susfs补丁
+        if [[ "$ENABLE_SUSFS" != "true" ]]; then
+            cd ../..
+            git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-$ANDROID_VERSION-$KERNEL_VERSION
+            cd kernel_platform
+            # Copy SUSFS patches
+            cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-$ANDROID_VERSION-$KERNEL_VERSION.patch ./crd/
+            cp ../susfs4ksu/kernel_patches/fs/* ./crd/fs/
+            cp ../susfs4ksu/kernel_patches/include/linux/* ./crd/include/linux/
+            echo "正在给内核打susfs补丁"
+            cd ./common
+            patch -p1 < 50_add_susfs_in_gki-$ANDROID_VERSION-$KERNEL_VERSION.patch || true
+            echo "Applying hooks for SukiSU..."
+            cp ../../SukiSU_patch/hooks/scope_min_manual_hooks_v1.6.patch ./
+            patch -p1 -F 3 < scope_min_manual_hooks_v1.6.patch
+        else
+            # 打通用钩子补丁
+            curl -LSs "https://raw.githubusercontent.com/yuhangle/Action_OneplusAce3v_SukiSU/master/patch/ksu_hooks.patch" -o ksu_hooks.patch
+            patch -p1 < ksu_hooks.patch || true
+        fi
 
         cp ../../SukiSU_patch/69_hide_stuff.patch ./
         patch -p1 -F 3 < 69_hide_stuff.patch || true
         
-        cp ../../SukiSU_patch/other/zram/zram_patch/$KERNEL_VERSION/lz4kd.patch ./
-        patch -p1 -F 3 < lz4kd.patch || true
         cd ..
 
         # ------------------------------
         # 配置 defconfig
         # ------------------------------
         cd common
+        # susfs配置
+        if [[ "$ENABLE_SUSFS" != "true" ]]; then
+            cat >> ./arch/arm64/configs/gki_defconfig <<EOF
+            CONFIG_KSU=y
+            CONFIG_KSU_SUSFS=y
+            CONFIG_KSU_SUSFS_SUS_SU=n
+            CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
+            CONFIG_KSU_SUSFS_SUS_PATH=y
+            CONFIG_KSU_SUSFS_SUS_MOUNT=y
+            CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y
+            CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y
+            CONFIG_KSU_SUSFS_SUS_KSTAT=y
+            CONFIG_KSU_SUSFS_SUS_OVERLAYFS=n
+            CONFIG_KSU_SUSFS_TRY_UMOUNT=y
+            CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y
+            CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+            CONFIG_KSU_SUSFS_ENABLE_LOG=y
+            CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
+            CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
+            CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+            EOF
+        else
+            cat >> ./arch/arm64/configs/gki_defconfig <<EOF
+            CONFIG_KSU=y
+            CONFIG_KSU_MANUAL_HOOK=y
+            EOF
+        fi
+
         cat >> ./arch/arm64/configs/gki_defconfig <<EOF
-        CONFIG_KSU=y
-        CONFIG_KSU_MANUAL_HOOK=y
         CONFIG_TMPFS_XATTR=y
         CONFIG_TMPFS_POSIX_ACL=y
         CONFIG_FHANDLE=y
