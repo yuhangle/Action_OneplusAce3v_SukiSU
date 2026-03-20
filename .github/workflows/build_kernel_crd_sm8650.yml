@@ -398,6 +398,5 @@ jobs:
     - name: Upload Artifact (Simple Naming & Auto Zip)
       uses: actions/upload-artifact@v4
       with:
-        name: Anykernel3-ReSukiSU-${{ env.KSU_VERSION }}-OneplusAce3v
-        # 直接上传 AnyKernel3 目录，让 Action 自动压缩成 ZIP
+        name: Anykernel3-ReSukiSU-${{ env.KSU_VERSION }}-OneplusAce3v${{ inputs.ENABLE_SUSFS == 'true' && '-susfs' || '' }}
         path: ${{ env.AK3_UPLOAD_PATH }}
