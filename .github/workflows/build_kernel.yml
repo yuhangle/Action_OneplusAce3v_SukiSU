@@ -1,4 +1,4 @@
-name: Build Kernel SUKISU ColorOS 16.0.2.401 (OnePlus Ace 3V)
+name: Build Kernel ReSukiSU ColorOS 16.0.2.401 (OnePlus Ace 3V)
 
 on:
   workflow_dispatch:

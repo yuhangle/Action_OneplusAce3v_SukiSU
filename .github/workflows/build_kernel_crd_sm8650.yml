@@ -1,4 +1,4 @@
-name: Build Kernel RESUKISU with crdroid sm8650 (OnePlus Ace 3V)
+name: Build Kernel ReSukiSU with crdroid sm8650 (OnePlus Ace 3V)
 
 on:
   workflow_dispatch:
