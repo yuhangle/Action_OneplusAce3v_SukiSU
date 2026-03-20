@@ -164,7 +164,7 @@ jobs:
           cd common
           git init
           git remote add origin https://github.com/crdroidandroid/android_kernel_oneplus_sm8650
-          git fetch --depth=1 origin oneplus/sm7675_b_16.0.0_ace_3v
+          git fetch --depth=1 origin 16.0
           git checkout FETCH_HEAD
           cd .. # 回到 kernel_platform
           
