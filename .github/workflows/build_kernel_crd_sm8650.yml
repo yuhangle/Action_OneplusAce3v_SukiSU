@@ -202,6 +202,7 @@ jobs:
         CUSTOM_NAME_ENABLED: ${{ inputs.CUSTOM_NAME_ENABLED }}
         USE_FAKE_TIME: ${{ inputs.USE_FAKE_TIME }}
         KBUILD_BUILD_TIMESTAMP: ${{ inputs.FAKE_TIME_VAL }}
+        ENABLE_SUSFS: ${{ inputs.ENABLE_SUSFS }}
         # Kernel 配置参数
         CPU: 'sm7675'
         FEIL: 'oneplus_ace3_v_v'
@@ -281,8 +282,11 @@ jobs:
         
         cd kernel_platform/common
 
+        cp ../../SukiSU_patch/69_hide_stuff.patch ./
+        patch -p1 -F 3 < 69_hide_stuff.patch || true
+
         # susfs补丁
-        if [[ "$ENABLE_SUSFS" != "true" ]]; then
+        if [[ "$ENABLE_SUSFS" == "true" ]]; then
             cd ../..
             git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-$ANDROID_VERSION-$KERNEL_VERSION
             cd kernel_platform
@@ -295,15 +299,12 @@ jobs:
             patch -p1 < 50_add_susfs_in_gki-$ANDROID_VERSION-$KERNEL_VERSION.patch || true
             echo "Applying hooks for SukiSU..."
             cp ../../SukiSU_patch/hooks/scope_min_manual_hooks_v1.6.patch ./
-            patch -p1 -F 3 < scope_min_manual_hooks_v1.6.patch
+            patch -p1 -F 3 < scope_min_manual_hooks_v1.6.patch || true
         else
             # 打通用钩子补丁
             curl -LSs "https://raw.githubusercontent.com/yuhangle/Action_OneplusAce3v_SukiSU/master/patch/ksu_hooks.patch" -o ksu_hooks.patch
             patch -p1 < ksu_hooks.patch || true
         fi
-
-        cp ../../SukiSU_patch/69_hide_stuff.patch ./
-        patch -p1 -F 3 < 69_hide_stuff.patch || true
         
         cd ..
 
@@ -312,7 +313,7 @@ jobs:
         # ------------------------------
         cd common
         # susfs配置
-        if [[ "$ENABLE_SUSFS" != "true" ]]; then
+        if [[ "$ENABLE_SUSFS" == "true" ]]; then
             cat >> ./arch/arm64/configs/gki_defconfig <<EOF
             CONFIG_KSU=y
             CONFIG_KSU_SUSFS=y
