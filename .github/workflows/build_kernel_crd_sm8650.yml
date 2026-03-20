@@ -229,17 +229,19 @@ jobs:
         else
             export KBUILD_BUILD_TIMESTAMP
         fi
+
+        cd kernel_platform/common
+        # 拉取合并脚本
+        curl -LSs "https://raw.githubusercontent.com/yuhangle/Action_OneplusAce3v_SukiSU/master/shell/merge.sh" -o merge.sh
+        chmod +x ./merge.sh
+        ./merge.sh
+        cd ../..
         
         # ------------------------------
         # 清理 & 修改 setlocalversion
         # ------------------------------
         rm kernel_platform/common/android/abi_gki_protected_exports_* 2>/dev/null || true
         rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* 2>/dev/null || true
-
-        # 拉取合并脚本
-        curl -LSs "https://raw.githubusercontent.com/yuhangle/Action_OneplusAce3v_SukiSU/master/shell/merge.sh" -o merge.sh
-        chmod +x ./merge.sh
-        ./merge.sh
 
         cd kernel_platform
         for dir in common msm-kernel external/dtc; do
