@@ -296,23 +296,10 @@ jobs:
             echo "Applying hooks for SukiSU..."
             cp ../../SukiSU_patch/hooks/scope_min_manual_hooks_v1.6.patch ./
             patch -p1 -F 3 < scope_min_manual_hooks_v1.6.patch || true
-            # 69_hide_stuff.patch 和 lz4kd.patch 仍然需要应用
-            cp ../../SukiSU_patch/69_hide_stuff.patch ./
-            patch -p1 -F 3 < 69_hide_stuff.patch || true
-            cp ../../SukiSU_patch/other/zram/zram_patch/$KERNEL_VERSION/lz4kd.patch ./
-            patch -p1 -F 3 < lz4kd.patch || true
-            cd ..
         else
             # 打通用钩子补丁
             curl -LSs "https://raw.githubusercontent.com/yuhangle/Action_OneplusAce3v_SukiSU/master/patch/ksu_hooks.patch" -o ksu_hooks.patch
             patch -p1 < ksu_hooks.patch || true
-
-            cp ../../SukiSU_patch/69_hide_stuff.patch ./
-            patch -p1 -F 3 < 69_hide_stuff.patch || true
-            
-            cp ../../SukiSU_patch/other/zram/zram_patch/$KERNEL_VERSION/lz4kd.patch ./
-            patch -p1 -F 3 < lz4kd.patch || true
-            cd ..
         fi
 
         cp ../../SukiSU_patch/69_hide_stuff.patch ./
@@ -355,7 +342,6 @@ jobs:
         echo "CONFIG_FHANDLE=y" >> ./arch/arm64/configs/gki_defconfig
         echo "CONFIG_KPM=y" >> ./arch/arm64/configs/gki_defconfig
 
-        # 以下配置不受 susfs 影响，保持原样
         cat >> ./arch/arm64/configs/gki_defconfig <<EOF
         CONFIG_ZSMALLOC=y
         CONFIG_ZRAM=m
