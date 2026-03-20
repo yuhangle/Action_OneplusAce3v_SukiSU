@@ -287,9 +287,9 @@ jobs:
             git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-$ANDROID_VERSION-$KERNEL_VERSION
             cd kernel_platform
             # Copy SUSFS patches
-            cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-$ANDROID_VERSION-$KERNEL_VERSION.patch ./crd/
-            cp ../susfs4ksu/kernel_patches/fs/* ./crd/fs/
-            cp ../susfs4ksu/kernel_patches/include/linux/* ./crd/include/linux/
+            cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-$ANDROID_VERSION-$KERNEL_VERSION.patch ./common/
+            cp ../susfs4ksu/kernel_patches/fs/* ./common/fs/
+            cp ../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
             echo "正在给内核打susfs补丁"
             cd ./common
             patch -p1 < 50_add_susfs_in_gki-$ANDROID_VERSION-$KERNEL_VERSION.patch || true
