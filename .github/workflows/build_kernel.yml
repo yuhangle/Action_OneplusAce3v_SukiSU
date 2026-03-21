@@ -290,6 +290,13 @@ jobs:
             echo "Applying hooks for SukiSU..."
             cp ../../SukiSU_patch/hooks/scope_min_manual_hooks_v1.6.patch ./
             patch -p1 -F 3 < scope_min_manual_hooks_v1.6.patch || true
+            cd ./fs/proc
+            # 检查是否已经包含 susfs_def.h
+            if ! grep -q "susfs_def.h" base.c; then
+                # 在 #include <linux/cpufreq_times.h> 之后插入
+                sed -i '/^#include <linux\/cpufreq_times.h>/a #if defined(CONFIG_KSU_SUSFS_SUS_MAP) && defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)\n#include <linux/susfs_def.h>\n#endif' base.c
+            fi
+            cd ../..
         else
             # 打通用钩子补丁
             curl -LSs "https://raw.githubusercontent.com/yuhangle/Action_OneplusAce3v_SukiSU/master/patch/ksu_hooks.patch" -o ksu_hooks.patch
