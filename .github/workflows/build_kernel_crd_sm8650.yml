@@ -267,7 +267,7 @@ jobs:
         # 集成 ReSukiSU
         # ------------------------------
         cd kernel_platform
-        curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s builtin
+        curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
 
         # 提取 KSU 版本号并导出到环境变量
         cd KernelSU
