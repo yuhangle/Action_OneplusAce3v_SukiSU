@@ -434,8 +434,13 @@ jobs:
         echo "AK3_UPLOAD_PATH=$GITHUB_WORKSPACE/kernel_workspace/$AK3_DIR" >> $GITHUB_ENV
         echo "[*] Ready to upload raw AnyKernel3 directory."
 
+    - name: Debug naming
+      run: |
+        echo "ENABLE_SUSFS = ${{ inputs.ENABLE_SUSFS }}"
+        echo "Should add susfs? ${{ inputs.ENABLE_SUSFS && 'yes' || 'no' }}"
+
     - name: Upload Artifact (Simple Naming & Auto Zip)
       uses: actions/upload-artifact@v4
       with:
-        name: Anykernel3-ReSukiSU-${{ env.KSU_VERSION }}-OneplusAce3v${{ inputs.ENABLE_SUSFS == 'true' && '-susfs' || '' }}
+        name: Anykernel3-ReSukiSU-${{ env.KSU_VERSION }}-OneplusAce3v${{ inputs.ENABLE_SUSFS && '-susfs' || '' }}
         path: ${{ env.AK3_UPLOAD_PATH }}
