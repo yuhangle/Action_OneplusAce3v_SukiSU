@@ -398,5 +398,5 @@ jobs:
     - name: Upload Artifact (Simple Naming & Auto Zip)
       uses: actions/upload-artifact@v4
       with:
-        name: Anykernel3-ReSukiSU-${{ env.KSU_VERSION }}-OneplusAce3v${{ inputs.ENABLE_SUSFS == 'true' && '-susfs' || '' }}
+        name: Anykernel3-ReSukiSU-${{ env.KSU_VERSION }}-OneplusAce3v${{ inputs.ENABLE_SUSFS && '-susfs' || '' }}-crd
         path: ${{ env.AK3_UPLOAD_PATH }}
