@@ -294,6 +294,44 @@ jobs:
             echo "正在给内核打susfs补丁"
             cd ./common
             patch -p1 < 50_add_susfs_in_gki-$ANDROID_VERSION-$KERNEL_VERSION.patch || true
+
+            # 手动修复 namespace.c
+            if [ -f fs/namespace.c.rej ]; then
+              echo "检测到 namespace.c 补丁失败，手动修复..."
+              
+              # 在 #include <linux/mnt_idmapping.h> 后添加 susfs_def.h
+              if ! grep -q "susfs_def.h" fs/namespace.c; then
+                sed -i '/^#include <linux\/mnt_idmapping.h>/a \
+            #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\
+            #include <linux/susfs_def.h>\
+            #endif' fs/namespace.c
+              fi
+              
+              # 在 #include "internal.h" 后添加 extern 和变量定义
+              if ! grep -q "susfs_mnt_id_ida" fs/namespace.c; then
+                sed -i '/^#include "internal.h"/a \
+            \
+            #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\
+            extern bool susfs_is_current_ksu_domain(void);\
+            extern bool susfs_is_sdcard_android_data_decrypted __read_mostly;\
+            \
+            #define CL_COPY_MNT_NS BIT(25) /* used by copy_mnt_ns() */\
+            \
+            static DEFINE_IDA(susfs_mnt_id_ida);\
+            static DEFINE_IDA(susfs_mnt_group_ida);\
+            \
+            #endif' fs/namespace.c
+              fi
+              
+              # 删除 rej 文件
+              rm -f fs/namespace.c.rej
+              echo "✓ namespace.c 修复完成"
+            fi
+            
+            # 验证修复
+            grep -q "susfs_def.h" fs/namespace.c && echo "✓ susfs_def.h 已添加"
+            grep -q "susfs_mnt_id_ida" fs/namespace.c && echo "✓ 变量定义已添加"
+
             echo "Applying hooks for SukiSU..."
             cp ../../SukiSU_patch/hooks/scope_min_manual_hooks_v1.6.patch ./
             patch -p1 -F 3 < scope_min_manual_hooks_v1.6.patch || true
