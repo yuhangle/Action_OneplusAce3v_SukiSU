@@ -296,28 +296,32 @@ jobs:
 
             if [ -f fs/namespace.c.rej ]; then
               echo "检测到 namespace.c 补丁失败，手动修复..."
-
-              printf '%s\n' \
-                '/^#include <linux/mnt_idmapping.h>/a' \
-                '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT' \
-                '#include <linux/susfs_def.h>' \
-                '#endif' \
-                '.' \
-                '/^#include "internal.h"/a' \
-                '' \
-                '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT' \
-                'extern bool susfs_is_current_ksu_domain(void);' \
-                'extern bool susfs_is_sdcard_android_data_decrypted __read_mostly;' \
-                '' \
-                '#define CL_COPY_MNT_NS BIT(25) /* used by copy_mnt_ns() */' \
-                '' \
-                'static DEFINE_IDA(susfs_mnt_id_ida);' \
-                'static DEFINE_IDA(susfs_mnt_group_ida);' \
-                '' \
-                '#endif' \
-                '.' \
-                'w' \
-                'q' | ed -s fs/namespace.c
+              
+              awk '
+              /^#include <linux\/mnt_idmapping.h>/ {
+                  print
+                  print "#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT"
+                  print "#include <linux/susfs_def.h>"
+                  print "#endif"
+                  next
+              }
+              /^#include "internal.h"/ {
+                  print
+                  print ""
+                  print "#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT"
+                  print "extern bool susfs_is_current_ksu_domain(void);"
+                  print "extern bool susfs_is_sdcard_android_data_decrypted __read_mostly;"
+                  print ""
+                  print "#define CL_COPY_MNT_NS BIT(25) /* used by copy_mnt_ns() */"
+                  print ""
+                  print "static DEFINE_IDA(susfs_mnt_id_ida);"
+                  print "static DEFINE_IDA(susfs_mnt_group_ida);"
+                  print ""
+                  print "#endif"
+                  next
+              }
+              { print }
+              ' fs/namespace.c > /tmp/namespace_fixed.c && mv /tmp/namespace_fixed.c fs/namespace.c
               
               rm -f fs/namespace.c.rej
               echo "✓ namespace.c 修复完成"
