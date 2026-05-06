@@ -292,40 +292,7 @@ jobs:
             cp ../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
             echo "正在给内核打susfs补丁"
             cd ./common
-            patch -p1 < 50_add_susfs_in_gki-$ANDROID_VERSION-$KERNEL_VERSION.patch || true
-
-            if [ -f fs/namespace.c.rej ]; then
-              echo "检测到 namespace.c 补丁失败，手动修复..."
-              
-              awk '
-              /^#include <linux\/mnt_idmapping.h>/ {
-                  print
-                  print "#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT"
-                  print "#include <linux/susfs_def.h>"
-                  print "#endif"
-                  next
-              }
-              /^#include "internal.h"/ {
-                  print
-                  print ""
-                  print "#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT"
-                  print "extern bool susfs_is_current_ksu_domain(void);"
-                  print "extern bool susfs_is_sdcard_android_data_decrypted __read_mostly;"
-                  print ""
-                  print "#define CL_COPY_MNT_NS BIT(25) /* used by copy_mnt_ns() */"
-                  print ""
-                  print "static DEFINE_IDA(susfs_mnt_id_ida);"
-                  print "static DEFINE_IDA(susfs_mnt_group_ida);"
-                  print ""
-                  print "#endif"
-                  next
-              }
-              { print }
-              ' fs/namespace.c > /tmp/namespace_fixed.c && mv /tmp/namespace_fixed.c fs/namespace.c
-              
-              rm -f fs/namespace.c.rej
-              echo "✓ namespace.c 修复完成"
-            fi
+            patch -p1 -F3 < 50_add_susfs_in_gki-*.patch || true
 
             echo "Applying hooks for SukiSU..."
             cp ../../SukiSU_patch/hooks/scope_min_manual_hooks_v1.6.patch ./
