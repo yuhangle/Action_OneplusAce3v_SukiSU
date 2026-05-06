@@ -294,9 +294,9 @@ jobs:
             cd ./common
             patch -p1 -F3 < 50_add_susfs_in_gki-*.patch || true
 
-            echo "Applying hooks for SukiSU..."
-            cp ../../SukiSU_patch/hooks/scope_min_manual_hooks_v1.6.patch ./
-            patch -p1 -F 3 < scope_min_manual_hooks_v1.6.patch || true
+            #echo "Applying hooks for SukiSU..."
+            #cp ../../SukiSU_patch/hooks/scope_min_manual_hooks_v1.6.patch ./
+            #patch -p1 -F 3 < scope_min_manual_hooks_v1.6.patch || true
         else
             curl -LSs "https://raw.githubusercontent.com/yuhangle/Action_OneplusAce3v_SukiSU/master/patch/ksu_hooks.patch" -o ksu_hooks.patch
             patch -p1 < ksu_hooks.patch || true
