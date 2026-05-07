@@ -292,6 +292,8 @@ jobs:
             cp ../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
             echo "正在给内核打susfs补丁"
             cd ./common
+            sed -i 's|^@@ -32,10 +32,21 @@|@@ -32,11 +32,22 @@|' 50_add_susfs_in_gki-*.patch
+            sed -i '/^ #include <linux\/mnt_idmapping.h>/a\ #include <trace/hooks/blk.h>' 50_add_susfs_in_gki-*.patch
             patch -p1 -F3 < 50_add_susfs_in_gki-*.patch || true
 
             #echo "Applying hooks for SukiSU..."
