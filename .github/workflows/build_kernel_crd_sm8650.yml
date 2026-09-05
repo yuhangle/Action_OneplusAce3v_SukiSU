@@ -287,6 +287,10 @@ jobs:
         
         cd kernel_platform/common
 
+        # 打隐藏应用补丁
+        cp ../../SukiSU_patch/69_hide_stuff.patch ./
+        patch -p1 -F 3 < 69_hide_stuff.patch || true
+        
         # susfs补丁
         if [[ "$ENABLE_SUSFS" == "true" ]]; then
             cd ../..
@@ -344,9 +348,6 @@ jobs:
             curl -LSs "https://raw.githubusercontent.com/yuhangle/Action_OneplusAce3v_SukiSU/master/patch/ksu_hooks.patch" -o ksu_hooks.patch
             patch -p1 < ksu_hooks.patch || true
         fi
-
-        cp ../../SukiSU_patch/69_hide_stuff.patch ./
-        patch -p1 -F 3 < 69_hide_stuff.patch || true
         
         cd ..
 
