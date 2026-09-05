@@ -287,10 +287,6 @@ jobs:
         
         cd kernel_platform/common
 
-        # 打隐藏应用补丁
-        cp ../../SukiSU_patch/69_hide_stuff.patch ./
-        patch -p1 -F 3 < 69_hide_stuff.patch || true
-        
         # susfs补丁
         if [[ "$ENABLE_SUSFS" == "true" ]]; then
             cd ../..
@@ -314,20 +310,11 @@ jobs:
             echo "===== 恢复 namespace hook ====="
             sed -i '/#include "internal.h"/a #include <trace/hooks/blk.h>' ./fs/namespace.c
 
-            echo "===== 检查 task_mmu.c ====="
-            echo "文件: $(realpath ./fs/proc/task_mmu.c)"
-            grep -n -A3 -B3 "dentry" ./fs/proc/task_mmu.c || true
+            # 打隐藏应用补丁
+            cp ../../SukiSU_patch/69_hide_stuff.patch ./
+            patch -p1 -F 3 < 69_hide_stuff.patch || true
 
-            echo "===== 修复 dentry ====="
             sed -i 's/struct dentry \*dentry[[:space:]]*;/struct dentry *dentry = NULL;/' ./fs/proc/task_mmu.c
-
-            echo "===== 修复后的 task_mmu.c ====="
-            grep -n -A3 -B3 "dentry" ./fs/proc/task_mmu.c || true
-
-            echo "===== task_mmu.c 260-350 ====="
-            sed -n '260,350p' ./fs/proc/task_mmu.c || true
-
-            echo "===== 修复补丁x2 ====="
 
             sed -i '/^		if (key_pass)$/{
             N
@@ -337,16 +324,10 @@ jobs:
                     ERR(!ENGINE_ctrl_cmd_string(e, "PIN", key_pass, 0), "Set PKCS#11 PIN");\
             #endif
             }' certs/extract-cert.c
-
-            echo "===== 修复完成 ====="
-
-
-            #echo "Applying hooks for SukiSU..."
-            #cp ../../SukiSU_patch/hooks/scope_min_manual_hooks_v1.6.patch ./
-            #patch -p1 -F 3 < scope_min_manual_hooks_v1.6.patch || true
         else
-            curl -LSs "https://raw.githubusercontent.com/yuhangle/Action_OneplusAce3v_SukiSU/master/patch/ksu_hooks.patch" -o ksu_hooks.patch
-            patch -p1 < ksu_hooks.patch || true
+            # 打隐藏应用补丁
+            cp ../../SukiSU_patch/69_hide_stuff.patch ./
+            patch -p1 -F 3 < 69_hide_stuff.patch || true
         fi
         
         cd ..
