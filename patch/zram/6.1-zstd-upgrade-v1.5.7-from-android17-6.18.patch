@@ -1,13 +1,225 @@
-From 26c53f56b707d30a49c76ebb8c73502d8c93c463 Mon Sep 17 00:00:00 2001
-From: yuhangle <893033655@qq.com>
-Date: Sat, 5 Sep 2026 16:29:20 +0800
-Subject: [PATCH 1/2] include: linux: add intptr_t typedef
-
-Backport of upstream 3db55767da74 ("add intptr_t") from the 6.18 tree. Needed by lib/zstd v1.5.7: zstd_deps.h relies on intptr_t being provided by <linux/types.h>.
----
- include/linux/types.h | 1 +
- 1 file changed, 1 insertion(+)
-
+diff --git a/certs/Makefile b/certs/Makefile
+index 799ad7b9e68a..67e1f2707c2f 100644
+--- a/certs/Makefile
++++ b/certs/Makefile
+@@ -84,5 +84,5 @@ targets += x509_revocation_list
+ 
+ hostprogs := extract-cert
+ 
+-HOSTCFLAGS_extract-cert.o = $(shell $(HOSTPKG_CONFIG) --cflags libcrypto 2> /dev/null)
++HOSTCFLAGS_extract-cert.o = $(shell $(HOSTPKG_CONFIG) --cflags libcrypto 2> /dev/null) -I$(srctree)/scripts
+ HOSTLDLIBS_extract-cert = $(shell $(HOSTPKG_CONFIG) --libs libcrypto 2> /dev/null || echo -lcrypto)
+diff --git a/certs/extract-cert.c b/certs/extract-cert.c
+index 35fa2470dce5..7d6d468ed612 100644
+--- a/certs/extract-cert.c
++++ b/certs/extract-cert.c
+@@ -21,14 +21,17 @@
+ #include <openssl/bio.h>
+ #include <openssl/pem.h>
+ #include <openssl/err.h>
+-#include <openssl/engine.h>
+-
+-/*
+- * OpenSSL 3.0 deprecates the OpenSSL's ENGINE API.
+- *
+- * Remove this if/when that API is no longer used
+- */
+-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
++#if OPENSSL_VERSION_MAJOR >= 3
++# define USE_PKCS11_PROVIDER
++# include <openssl/provider.h>
++# include <openssl/store.h>
++#else
++# if !defined(OPENSSL_NO_ENGINE) && !defined(OPENSSL_NO_DEPRECATED_3_0)
++#  define USE_PKCS11_ENGINE
++#  include <openssl/engine.h>
++# endif
++#endif
++#include "ssl-common.h"
+ 
+ #define PKEY_ID_PKCS7 2
+ 
+@@ -40,49 +43,10 @@ void format(void)
+ 	exit(2);
+ }
+ 
+-static void display_openssl_errors(int l)
+-{
+-	const char *file;
+-	char buf[120];
+-	int e, line;
+-
+-	if (ERR_peek_error() == 0)
+-		return;
+-	fprintf(stderr, "At main.c:%d:\n", l);
+-
+-	while ((e = ERR_get_error_line(&file, &line))) {
+-		ERR_error_string(e, buf);
+-		fprintf(stderr, "- SSL %s: %s:%d\n", buf, file, line);
+-	}
+-}
+-
+-#ifndef OPENSSL_IS_BORINGSSL
+-static void drain_openssl_errors(void)
+-{
+-	const char *file;
+-	int line;
+-
+-	if (ERR_peek_error() == 0)
+-		return;
+-	while (ERR_get_error_line(&file, &line)) {}
+-}
+-#endif
+-
+-#define ERR(cond, fmt, ...)				\
+-	do {						\
+-		bool __cond = (cond);			\
+-		display_openssl_errors(__LINE__);	\
+-		if (__cond) {				\
+-			err(1, fmt, ## __VA_ARGS__);	\
+-		}					\
+-	} while(0)
+-
+-#ifdef USE_PKCS11_ENGINE
+ static const char *key_pass;
+-#endif
+ static BIO *wb;
+ static char *cert_dst;
+-static int kbuild_verbose;
++static bool verbose;
+ 
+ static void write_cert(X509 *x509)
+ {
+@@ -94,41 +58,41 @@ static void write_cert(X509 *x509)
+ 	}
+ 	X509_NAME_oneline(X509_get_subject_name(x509), buf, sizeof(buf));
+ 	ERR(!i2d_X509_bio(wb, x509), "%s", cert_dst);
+-	if (kbuild_verbose)
++	if (verbose)
+ 		fprintf(stderr, "Extracted cert: %s\n", buf);
+ }
+ 
+-int main(int argc, char **argv)
++static X509 *load_cert_pkcs11(const char *cert_src)
+ {
+-	char *cert_src;
++	X509 *cert = NULL;
++#ifdef USE_PKCS11_PROVIDER
++	OSSL_STORE_CTX *store;
+ 
+-	OpenSSL_add_all_algorithms();
+-	ERR_load_crypto_strings();
+-	ERR_clear_error();
++	if (!OSSL_PROVIDER_try_load(NULL, "pkcs11", true))
++		ERR(1, "OSSL_PROVIDER_try_load(pkcs11)");
++	if (!OSSL_PROVIDER_try_load(NULL, "default", true))
++		ERR(1, "OSSL_PROVIDER_try_load(default)");
+ 
+-	kbuild_verbose = atoi(getenv("KBUILD_VERBOSE")?:"0");
++	store = OSSL_STORE_open(cert_src, NULL, NULL, NULL, NULL);
++	ERR(!store, "OSSL_STORE_open");
+ 
+-#ifdef USE_PKCS11_ENGINE
+-	key_pass = getenv("KBUILD_SIGN_PIN");
+-#endif
+-
+-	if (argc != 3)
+-		format();
++	while (!OSSL_STORE_eof(store)) {
++		OSSL_STORE_INFO *info = OSSL_STORE_load(store);
+ 
+-	cert_src = argv[1];
+-	cert_dst = argv[2];
+-
+-	if (!cert_src[0]) {
+-		/* Invoked with no input; create empty file */
+-		FILE *f = fopen(cert_dst, "wb");
+-		ERR(!f, "%s", cert_dst);
+-		fclose(f);
+-		exit(0);
+-	} else if (!strncmp(cert_src, "pkcs11:", 7)) {
+-#ifdef OPENSSL_IS_BORINGSSL
+-		ERR(1, "BoringSSL does not support extracting from PKCS#11");
+-		exit(1);
+-#else
++		if (!info) {
++			drain_openssl_errors(__LINE__, 0);
++			continue;
++		}
++		if (OSSL_STORE_INFO_get_type(info) == OSSL_STORE_INFO_CERT) {
++			cert = OSSL_STORE_INFO_get1_CERT(info);
++			ERR(!cert, "OSSL_STORE_INFO_get1_CERT");
++		}
++		OSSL_STORE_INFO_free(info);
++		if (cert)
++			break;
++	}
++	OSSL_STORE_close(store);
++#elif defined(USE_PKCS11_ENGINE)
+ 		ENGINE *e;
+ 		struct {
+ 			const char *cert_id;
+@@ -139,19 +103,57 @@ int main(int argc, char **argv)
+ 		parms.cert = NULL;
+ 
+ 		ENGINE_load_builtin_engines();
+-		drain_openssl_errors();
++		drain_openssl_errors(__LINE__, 1);
+ 		e = ENGINE_by_id("pkcs11");
+ 		ERR(!e, "Load PKCS#11 ENGINE");
+ 		if (ENGINE_init(e))
+-			drain_openssl_errors();
++			drain_openssl_errors(__LINE__, 1);
+ 		else
+ 			ERR(1, "ENGINE_init");
+ 		if (key_pass)
+ 			ERR(!ENGINE_ctrl_cmd_string(e, "PIN", key_pass, 0), "Set PKCS#11 PIN");
+ 		ENGINE_ctrl_cmd(e, "LOAD_CERT_CTRL", 0, &parms, NULL, 1);
+ 		ERR(!parms.cert, "Get X.509 from PKCS#11");
+-		write_cert(parms.cert);
++		cert = parms.cert;
++#else
++		fprintf(stderr, "no pkcs11 engine/provider available\n");
++		exit(1);
+ #endif
++	return cert;
++}
++
++int main(int argc, char **argv)
++{
++	char *cert_src;
++	char *verbose_env;
++
++	OpenSSL_add_all_algorithms();
++	ERR_load_crypto_strings();
++	ERR_clear_error();
++
++	verbose_env = getenv("KBUILD_VERBOSE");
++	if (verbose_env && strchr(verbose_env, '1'))
++		verbose = true;
++
++        key_pass = getenv("KBUILD_SIGN_PIN");
++
++	if (argc != 3)
++		format();
++
++	cert_src = argv[1];
++	cert_dst = argv[2];
++
++	if (!cert_src[0]) {
++		/* Invoked with no input; create empty file */
++		FILE *f = fopen(cert_dst, "wb");
++		ERR(!f, "%s", cert_dst);
++		fclose(f);
++		exit(0);
++	} else if (!strncmp(cert_src, "pkcs11:", 7)) {
++		X509 *cert = load_cert_pkcs11(cert_src);
++
++		ERR(!cert, "load_cert_pkcs11 failed");
++		write_cert(cert);
+ 	} else {
+ 		BIO *b;
+ 		X509 *x509;
 diff --git a/include/linux/types.h b/include/linux/types.h
 index f1df5d8df2ef..958792d887fb 100644
 --- a/include/linux/types.h
@@ -20,100 +232,6 @@ index f1df5d8df2ef..958792d887fb 100644
  
  #ifdef CONFIG_HAVE_UID16
  /* This is defined by include/asm-{arch}/posix_types.h */
--- 
-2.55.0
-
-
-From 229ec1d4884b6bf672209a9aae426ab61fbd0efd Mon Sep 17 00:00:00 2001
-From: yuhangle <893033655@qq.com>
-Date: Sat, 5 Sep 2026 16:29:20 +0800
-Subject: [PATCH 2/2] zstd: import upstream v1.5.7 (from android17-6.18)
-
-Port lib/zstd and the zstd kernel API headers from android-common-6.18 (android17-6.18-2026-06_r44, merge e61f33273ca7 of tag zstd-linus-v6.15-rc1) to this 6.1 tree, replacing the 1.4.10 copy.
-
-Upstream history this port corresponds to (AOSP kernel/common git):
-  4782c725c153 zstd: Move zstd-common module exports to zstd_common_module.c
-  2aa14b1ab2c4 zstd: import usptream v1.5.2
-  780f6a9afe8b lib: zstd: Fix -Wstringop-overflow warning
-  038505c41f0a lib: zstd: Backport fix for in-place decompression
-  6906598f1ce9 zstd: Fix definition of assert() [already in this tree as 78b342f0cda7]
-  77618db34645 zstd: Fix array-index-out-of-bounds UBSAN warning
-  4fc4187984e5 lib: zstd: export API needed for dictionary support
-  f3c11cf5cae0 lib: zstd: fix null-deref in ZSTD_createCDict_advanced2()
-  65d1f5507ed2 zstd: Import upstream v1.5.7
-  1400c87e6cac zstd: Increase DYNAMIC_BMI2 GCC version cutoff from 4.8 to 11.0 to work around compiler segfault
-
-6.1-specific adaptation: upstream v6.15 moved <asm/unaligned.h> to <linux/unaligned.h> (5f60d5f6bbc1), but 6.1 has no <linux/unaligned.h>, so lib/zstd/common/mem.h keeps including <asm/unaligned.h>.
----
- include/linux/zstd.h                          |  250 +-
- include/linux/zstd_errors.h                   |   30 +-
- include/linux/zstd_lib.h                      | 1494 ++++--
- lib/zstd/Makefile                             |    4 +-
- lib/zstd/common/allocations.h                 |   56 +
- lib/zstd/common/bits.h                        |  150 +
- lib/zstd/common/bitstream.h                   |  162 +-
- lib/zstd/common/compiler.h                    |  212 +-
- lib/zstd/common/cpu.h                         |    3 +-
- lib/zstd/common/debug.c                       |    9 +-
- lib/zstd/common/debug.h                       |   37 +-
- lib/zstd/common/entropy_common.c              |   53 +-
- lib/zstd/common/error_private.c               |   13 +-
- lib/zstd/common/error_private.h               |   99 +-
- lib/zstd/common/fse.h                         |  106 +-
- lib/zstd/common/fse_decompress.c              |  134 +-
- lib/zstd/common/huf.h                         |  270 +-
- lib/zstd/common/mem.h                         |    5 +-
- lib/zstd/common/portability_macros.h          |  118 +
- lib/zstd/common/zstd_common.c                 |   48 +-
- lib/zstd/common/zstd_deps.h                   |    8 +-
- lib/zstd/common/zstd_internal.h               |  224 +-
- lib/zstd/compress/clevels.h                   |  133 +
- lib/zstd/compress/fse_compress.c              |  151 +-
- lib/zstd/compress/hist.c                      |   13 +-
- lib/zstd/compress/hist.h                      |   10 +-
- lib/zstd/compress/huf_compress.c              |  999 +++-
- lib/zstd/compress/zstd_compress.c             | 4487 +++++++++++++----
- lib/zstd/compress/zstd_compress_internal.h    |  862 +++-
- lib/zstd/compress/zstd_compress_literals.c    |  156 +-
- lib/zstd/compress/zstd_compress_literals.h    |   23 +-
- lib/zstd/compress/zstd_compress_sequences.c   |   52 +-
- lib/zstd/compress/zstd_compress_sequences.h   |   16 +-
- lib/zstd/compress/zstd_compress_superblock.c  |  683 +--
- lib/zstd/compress/zstd_compress_superblock.h  |    3 +-
- lib/zstd/compress/zstd_cwksp.h                |  347 +-
- lib/zstd/compress/zstd_double_fast.c          |  572 ++-
- lib/zstd/compress/zstd_double_fast.h          |   27 +-
- lib/zstd/compress/zstd_fast.c                 | 1028 +++-
- lib/zstd/compress/zstd_fast.h                 |   16 +-
- lib/zstd/compress/zstd_lazy.c                 | 1610 ++++--
- lib/zstd/compress/zstd_lazy.h                 |  177 +-
- lib/zstd/compress/zstd_ldm.c                  |  172 +-
- lib/zstd/compress/zstd_ldm.h                  |   16 +-
- lib/zstd/compress/zstd_ldm_geartab.h          |    8 +-
- lib/zstd/compress/zstd_opt.c                  |  859 ++--
- lib/zstd/compress/zstd_opt.h                  |   55 +-
- lib/zstd/compress/zstd_preSplit.c             |  239 +
- lib/zstd/compress/zstd_preSplit.h             |   34 +
- lib/zstd/decompress/huf_decompress.c          | 1515 ++++--
- lib/zstd/decompress/zstd_ddict.c              |    9 +-
- lib/zstd/decompress/zstd_ddict.h              |    3 +-
- lib/zstd/decompress/zstd_decompress.c         |  432 +-
- lib/zstd/decompress/zstd_decompress_block.c   | 1434 ++++--
- lib/zstd/decompress/zstd_decompress_block.h   |   18 +-
- .../decompress/zstd_decompress_internal.h     |   49 +-
- lib/zstd/decompress_sources.h                 |    8 +-
- lib/zstd/zstd_common_module.c                 |   29 +
- lib/zstd/zstd_compress_module.c               |  130 +-
- lib/zstd/zstd_decompress_module.c             |   40 +-
- 60 files changed, 14444 insertions(+), 5456 deletions(-)
- create mode 100644 lib/zstd/common/allocations.h
- create mode 100644 lib/zstd/common/bits.h
- create mode 100644 lib/zstd/common/portability_macros.h
- create mode 100644 lib/zstd/compress/clevels.h
- create mode 100644 lib/zstd/compress/zstd_preSplit.c
- create mode 100644 lib/zstd/compress/zstd_preSplit.h
- create mode 100644 lib/zstd/zstd_common_module.c
-
 diff --git a/include/linux/zstd.h b/include/linux/zstd.h
 index 113408eef6ec..2f2a3c8b8a33 100644
 --- a/include/linux/zstd.h
@@ -30203,6 +30321,41 @@ index f4ed952ed485..0ae819f0c927 100644
  }
  EXPORT_SYMBOL(zstd_reset_dstream);
  
--- 
-2.55.0
-
+diff --git a/scripts/ssl-common.h b/scripts/ssl-common.h
+new file mode 100644
+index 000000000000..2db0e181143c
+--- /dev/null
++++ b/scripts/ssl-common.h
+@@ -0,0 +1,32 @@
++/* SPDX-License-Identifier: LGPL-2.1+ */
++/*
++ * SSL helper functions shared by sign-file and extract-cert.
++ */
++
++static void drain_openssl_errors(int l, int silent)
++{
++	const char *file;
++	char buf[120];
++	int e, line;
++
++	if (ERR_peek_error() == 0)
++		return;
++	if (!silent)
++		fprintf(stderr, "At main.c:%d:\n", l);
++
++	while ((e = ERR_peek_error_line(&file, &line))) {
++		ERR_error_string(e, buf);
++		if (!silent)
++			fprintf(stderr, "- SSL %s: %s:%d\n", buf, file, line);
++		ERR_get_error();
++	}
++}
++
++#define ERR(cond, fmt, ...)				\
++	do {						\
++		bool __cond = (cond);			\
++		drain_openssl_errors(__LINE__, 0);	\
++		if (__cond) {				\
++			errx(1, fmt, ## __VA_ARGS__);	\
++		}					\
++	} while (0)
