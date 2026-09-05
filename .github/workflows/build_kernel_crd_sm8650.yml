@@ -297,26 +297,44 @@ jobs:
             cp ../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
             echo "正在给内核打susfs补丁"
             cd ./common
-            # 临时修改使得补丁可以打上
-            sed -i '/#include <trace\/hooks\/blk\.h>/d' "./fs/namespace.c"
-            patch -p1 < 50_add_susfs_in_gki-$ANDROID_VERSION-$KERNEL_VERSION.patch || true
-            # 恢复文件
-            sed -i '/#include "internal.h"/a #include <trace/hooks/blk.h>' "./fs/namespace.c"
-            # 修复补丁导致的编译错误
-            echo "修复补丁"
-            sed -i 's/struct dentry \*dentry;/struct dentry *dentry = NULL;/' ./fs/proc/task_mmu.c
-            grep -n -A3 -B3 "struct dentry" ./fs/proc/task_mmu.c
 
-            echo "修复补丁x2"
+            echo "===== 当前目录 ====="
+            pwd
+
+            echo "===== 删除 namespace hook ====="
+            sed -i '/#include <trace\/hooks\/blk\.h>/d' ./fs/namespace.c
+
+            echo "===== 开始 SUSFS patch ====="
+            patch -p1 < 50_add_susfs_in_gki-$ANDROID_VERSION-$KERNEL_VERSION.patch
+
+            echo "===== 恢复 namespace hook ====="
+            sed -i '/#include "internal.h"/a #include <trace/hooks/blk.h>' ./fs/namespace.c
+
+            echo "===== 检查 task_mmu.c ====="
+            echo "文件: $(realpath ./fs/proc/task_mmu.c)"
+            grep -n -A3 -B3 "dentry" ./fs/proc/task_mmu.c || true
+
+            echo "===== 修复 dentry ====="
+            sed -i 's/struct dentry \*dentry[[:space:]]*;/struct dentry *dentry = NULL;/' ./fs/proc/task_mmu.c
+
+            echo "===== 修复后的 task_mmu.c ====="
+            grep -n -A3 -B3 "dentry" ./fs/proc/task_mmu.c || true
+
+            echo "===== task_mmu.c 260-350 ====="
+            sed -n '260,350p' ./fs/proc/task_mmu.c || true
+
+            echo "===== 修复补丁x2 ====="
+
             sed -i '/^		if (key_pass)$/{
             N
             /^		if (key_pass)\n			ERR(!ENGINE_ctrl_cmd_string(e, "PIN", key_pass, 0), "Set PKCS#11 PIN");$/c\
             #ifdef USE_PKCS11_ENGINE\
                 if (key_pass)\
-                  ERR(!ENGINE_ctrl_cmd_string(e, "PIN", key_pass, 0), "Set PKCS#11 PIN");\
+                    ERR(!ENGINE_ctrl_cmd_string(e, "PIN", key_pass, 0), "Set PKCS#11 PIN");\
             #endif
             }' certs/extract-cert.c
-            echo "修复完成"
+
+            echo "===== 修复完成 ====="
 
 
             #echo "Applying hooks for SukiSU..."
