@@ -20,9 +20,14 @@ on:
       FAKE_TIME_VAL:
         description: '伪造的时间戳 (仅当启用伪造时间时生效)'
         required: false
-        default: 'Sun Mar 1 00:00:00 UTC 2026'
+        default: 'Sat Aug 1 00:00:00 UTC 2026'
       ENABLE_SUSFS:
         description: '是否启用susfs (true/false)'
+        required: true
+        default: false
+        type: boolean
+      ENABLE_NEW_ZSTD:
+        description: '是否启用移植的1.5.7 zstd算法 (true/false)'
         required: true
         default: false
         type: boolean
@@ -292,9 +297,23 @@ jobs:
             cp ../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
             echo "正在给内核打susfs补丁"
             cd ./common
-            sed -i 's|^@@ -32,10 +32,21 @@|@@ -32,11 +32,22 @@|' 50_add_susfs_in_gki-*.patch
-            sed -i '/^ #include <linux\/mnt_idmapping.h>/a\ #include <trace/hooks/blk.h>' 50_add_susfs_in_gki-*.patch
-            patch -p1 -F3 < 50_add_susfs_in_gki-*.patch || true
+            # 临时修改使得补丁可以打上
+            sed -i '/#include <trace\/hooks\/blk\.h>/d' "./fs/namespace.c"
+            patch -p1 < 50_add_susfs_in_gki-$ANDROID_VERSION-$KERNEL_VERSION.patch || true
+            # 恢复文件
+            sed -i '/#include "internal.h"/a #include <trace/hooks/blk.h>' "./fs/namespace.c"
+            # 修复补丁导致的编译错误
+            sed -i 's/struct dentry \*dentry;/struct dentry *dentry = NULL;/' ./fs/proc/task_mmu.c
+
+            sed -i '/^		if (key_pass)$/{
+            N
+            /^		if (key_pass)\n			ERR(!ENGINE_ctrl_cmd_string(e, "PIN", key_pass, 0), "Set PKCS#11 PIN");$/c\
+            #ifdef USE_PKCS11_ENGINE\
+                if (key_pass)\
+                  ERR(!ENGINE_ctrl_cmd_string(e, "PIN", key_pass, 0), "Set PKCS#11 PIN");\
+            #endif
+            }' certs/extract-cert.c
+
 
             #echo "Applying hooks for SukiSU..."
             #cp ../../SukiSU_patch/hooks/scope_min_manual_hooks_v1.6.patch ./
@@ -313,18 +332,16 @@ jobs:
         # 配置 defconfig
         # ------------------------------
         cd common
+        echo "CONFIG_KSU=y" >> ./arch/arm64/configs/gki_defconfig
         # susfs配置
         if [[ "$ENABLE_SUSFS" == "true" ]]; then
-            echo "CONFIG_KSU=y" >> ./arch/arm64/configs/gki_defconfig
             echo "CONFIG_KSU_SUSFS=y" >> ./arch/arm64/configs/gki_defconfig
-            echo "CONFIG_KSU_SUSFS_SUS_SU=n" >> ./arch/arm64/configs/gki_defconfig
             echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> ./arch/arm64/configs/gki_defconfig
             echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> ./arch/arm64/configs/gki_defconfig
             echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> ./arch/arm64/configs/gki_defconfig
             echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y" >> ./arch/arm64/configs/gki_defconfig
             echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y" >> ./arch/arm64/configs/gki_defconfig
             echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> ./arch/arm64/configs/gki_defconfig
-            echo "CONFIG_KSU_SUSFS_SUS_OVERLAYFS=n" >> ./arch/arm64/configs/gki_defconfig
             echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> ./arch/arm64/configs/gki_defconfig
             echo "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y" >> ./arch/arm64/configs/gki_defconfig
             echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> ./arch/arm64/configs/gki_defconfig
@@ -332,26 +349,91 @@ jobs:
             echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> ./arch/arm64/configs/gki_defconfig
             echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> ./arch/arm64/configs/gki_defconfig
             echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> ./arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_SUS_MAP=y" >> ./arch/arm64/configs/gki_defconfig
         else
-            echo "CONFIG_KSU=y" >> ./arch/arm64/configs/gki_defconfig
-            echo "CONFIG_KSU_MANUAL_HOOK=y" >> ./arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS=n" >> ./arch/arm64/configs/gki_defconfig
         fi
 
+        # tmpfs相关
         echo "CONFIG_TMPFS_XATTR=y" >> ./arch/arm64/configs/gki_defconfig
         echo "CONFIG_TMPFS_POSIX_ACL=y" >> ./arch/arm64/configs/gki_defconfig
         echo "CONFIG_FHANDLE=y" >> ./arch/arm64/configs/gki_defconfig
-        echo "CONFIG_KPM=y" >> ./arch/arm64/configs/gki_defconfig
 
-        echo "CONFIG_DEFAULT_BBR=y" >> ./arch/arm64/configs/gki_defconfig
+        # 开启O2编译优化
+        echo "CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y" >> ./arch/arm64/configs/gki_defconfig
+
+        # 跳过将uapi标准头安装到 usr/include 目录的不必要操作，节省编译时间
+        echo "CONFIG_HEADERS_INSTALL=n" >> ./arch/arm64/configs/gki_defconfig
+
+        # 启用 BPF 流解析器,实现高性能网络流量处理,增强网络监控和分析能力
+        echo "CONFIG_BPF_STREAM_PARSER=y" >> ./arch/arm64/configs/gki_defconfig
+
+        #开启增强 Netfilter 防火墙扩展模块,支持基于地址类型的匹配规则,启用 IP 集合支持,提高防火墙规则灵活性,支持更复杂的流量过滤策略
+        echo "CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_NETFILTER_XT_SET=y" >> ./arch/arm64/configs/gki_defconfig
+        #启用 IP 集框架及其多种数据结构实现,提供高效的大规模 IP 地址管理,提高防火墙规则处理效率,减少内存占用
+        echo "CONFIG_IP_SET=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_IP_SET_MAX=65534" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_IP_SET_BITMAP_IP=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_IP_SET_BITMAP_IPMAC=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_IP_SET_BITMAP_PORT=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_IP_SET_HASH_IP=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_IP_SET_HASH_IPMARK=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_IP_SET_HASH_IPPORT=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_IP_SET_HASH_IPPORTIP=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_IP_SET_HASH_IPPORTNET=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_IP_SET_HASH_IPMAC=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_IP_SET_HASH_MAC=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_IP_SET_HASH_NETPORTNET=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_IP_SET_HASH_NET=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_IP_SET_HASH_NETNET=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_IP_SET_HASH_NETPORT=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_IP_SET_HASH_NETIFACE=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_IP_SET_LIST_SET=y" >> ./arch/arm64/configs/gki_defconfig
+        #启用 IPv6 网络地址转换
+        echo "CONFIG_IP6_NF_NAT=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_IP6_NF_TARGET_MASQUERADE=y" >> ./arch/arm64/configs/gki_defconfig
+
+        # BBR算法
         echo "CONFIG_TCP_CONG_ADVANCED=y" >> ./arch/arm64/configs/gki_defconfig
         echo "CONFIG_TCP_CONG_BBR=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_TCP_CONG_CUBIC=y" >> ./arch/arm64/configs/gki_defconfig
         echo "CONFIG_NET_SCH_FQ=y" >> ./arch/arm64/configs/gki_defconfig
-        echo "CONFIG_TCP_CONG_BIC=n" >> ./arch/arm64/configs/gki_defconfig
-        echo "CONFIG_TCP_CONG_WESTWOOD=n" >> ./arch/arm64/configs/gki_defconfig
-        echo "CONFIG_TCP_CONG_HTCP=n" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_DEFAULT_BBR=y" >> ./arch/arm64/configs/gki_defconfig
+
+        #开启DroidSpace所需要的内核配置
+        echo "CONFIG_SYSVIPC=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_IPC_NS=y" >> ./arch/arm64/configs/gki_defconfig
+        sed -i '/^# CONFIG_PID_NS is not set$/d' ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_PID_NS=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_DEVTMPFS=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_USER_NS=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_NETFILTER_XT_TARGET_REJECT=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_NETFILTER_XT_TARGET_LOG=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_NETFILTER_XT_MATCH_RECENT=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_IP_SET=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_IP_SET_HASH_IP=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_IP_SET_HASH_NET=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_NETFILTER_XT_SET=y" >> ./arch/arm64/configs/gki_defconfig
+
 
         echo "CONFIG_BBG=y" >> ./arch/arm64/configs/gki_defconfig
         wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash || true
+
+        # 增加DroidSpace支持
+        wget https://raw.githubusercontent.com/ravindu644/Droidspaces-OSS/refs/heads/main/Documentation/resources/kernel-patches/GKI/below-kernel-6.12/001.GKI-below-6.12-fix_sysvipc_kabi_6_7_8.patch
+
+        patch -p1 -F3 < ./001.GKI-below-6.12-fix_sysvipc_kabi_6_7_8.patch || true  
+
+        if [[ "$ENABLE_NEW_ZSTD" == "true" ]]; then
+            wget https://raw.githubusercontent.com/yuhangle/Action_OneplusAce3v_SukiSU/refs/heads/master/patch/zram/6.1-zstd-upgrade-v1.5.7-from-android17-6.18.patch
+            echo "打zstd 1.5.7补丁"
+            git apply ./6.1-zstd-upgrade-v1.5.7-from-android17-6.18.patch
+            sed -i 's/^CONFIG_ZRAM=m$/CONFIG_ZRAM=y/' ./arch/arm64/configs/gki_defconfig
+        fi
+
+
         cd ..
 
         sed -i "/stable_scmversion_cmd/s/-maybe-dirty//g" ./build/kernel/kleaf/impl/stamp.bzl
