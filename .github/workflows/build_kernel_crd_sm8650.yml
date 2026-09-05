@@ -303,8 +303,11 @@ jobs:
             # 恢复文件
             sed -i '/#include "internal.h"/a #include <trace/hooks/blk.h>' "./fs/namespace.c"
             # 修复补丁导致的编译错误
+            echo "修复补丁"
             sed -i 's/struct dentry \*dentry;/struct dentry *dentry = NULL;/' ./fs/proc/task_mmu.c
+            grep -n -A3 -B3 "struct dentry" ./fs/proc/task_mmu.c
 
+            echo "修复补丁x2"
             sed -i '/^		if (key_pass)$/{
             N
             /^		if (key_pass)\n			ERR(!ENGINE_ctrl_cmd_string(e, "PIN", key_pass, 0), "Set PKCS#11 PIN");$/c\
@@ -313,6 +316,7 @@ jobs:
                   ERR(!ENGINE_ctrl_cmd_string(e, "PIN", key_pass, 0), "Set PKCS#11 PIN");\
             #endif
             }' certs/extract-cert.c
+            echo "修复完成"
 
 
             #echo "Applying hooks for SukiSU..."
