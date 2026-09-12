@@ -198,7 +198,7 @@ jobs:
 
         # 打ReSukiSU补丁
 
-        curl -LSs "https://raw.githubusercontent.com/yuhangle/Action_OneplusAce3v_SukiSU/master/patch/sdm660_resuki.patch" -o sdm660_resuki.patch
+        curl -LSs "https://raw.githubusercontent.com/yuhangle/Action_OneplusAce3v_SukiSU/refs/heads/master/patch/ksu/sdm660_resuki.patch" -o sdm660_resuki.patch
         git apply ./sdm660_resuki.patch
 
         echo "[*] Applying KSU configuration..."
