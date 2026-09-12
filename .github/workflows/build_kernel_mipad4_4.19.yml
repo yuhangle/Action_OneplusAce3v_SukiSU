@@ -1,0 +1,280 @@
+name: Build Kernel ReSukiSU with 4.19 kernel (Mi Pad 4)
+
+on:
+  workflow_dispatch:
+    inputs:
+      KERNEL_NAME:
+        description: '自定义内核名称'
+        required: false
+        default: 'SouthWest-NG'
+      CUSTOM_NAME_ENABLED:
+        description: '是否启用自定义内核名 (禁用此选项将不添加内核名后缀)'
+        required: true
+        default: false
+        type: boolean
+      USE_FAKE_TIME:
+        description: '是否伪造构建时间 (true/false)'
+        required: true
+        default: false
+        type: boolean
+      FAKE_TIME_VAL:
+        description: '伪造的时间戳 (仅当启用伪造时间时生效)'
+        required: false
+        default: 'Sat Aug 1 00:00:00 UTC 2026'
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    
+    env:
+      # CCACHE 配置 (4G 安全限制)
+      CCACHE_DIR: ${{ github.workspace }}/.ccache_dir
+      CCACHE_MAXSIZE: 4G 
+      CCACHE_NOHASHDIR: 'true'
+      CCACHE_HARDLINK: 'true'
+      CCACHE_COMPILERCHECK: '%compiler% -dumpmachine; %compiler% -dumpversion'
+
+    steps:
+    - name: Maximize build space
+      uses: easimon/maximize-build-space@master
+      with:
+        root-reserve-mb: 8192
+        temp-reserve-mb: 2048
+        remove-dotnet: 'true'
+        remove-android: 'true'
+        remove-haskell: 'true'
+        remove-codeql: 'true'
+        
+    - name: Checkout Workflow
+      uses: actions/checkout@v4
+
+    - name: Create and Enable 4G Swap
+      run: |
+        sudo swapoff -a
+        sudo fallocate -l 4G /swapfile
+        sudo chmod 600 /swapfile
+        sudo mkswap /swapfile
+        sudo swapon /swapfile
+        free -h
+
+    - name: Install Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libelf-dev libssl-dev flex bison cpio dwarves bc ccache
+        sudo apt-get install -y git gnupg gperf build-essential zip curl zlib1g-dev gcc-multilib g++-multilib lib32ncurses5-dev x11proto-core-dev libx11-dev lib32z1-dev libgl1-mesa-dev unzip python3 python3-pip
+        
+        git config --global user.name "GitHub Action"
+        git config --global user.email "action@github.com"
+
+    - name: Restore Ccache (Skipping Save)
+      uses: actions/cache@v4
+      with:
+        path: ${{ env.CCACHE_DIR }}
+        # 修复后的 Key 定义，直接在 step 中引用 ${{ runner.os }} 和 ${{ hashFiles(...) }}
+        key: ccache-${{ runner.os }}-${{ hashFiles('kernel_workspace/kernel_platform/common/build.config*') }}-v2-${{ github.event.inputs.KERNEL_NAME }}
+        restore-keys: |
+          ccache-${{ runner.os }}-${{ hashFiles('kernel_workspace/kernel_platform/common/build.config*') }}-v2-
+          ccache-${{ runner.os }}-
+
+    - name: Initialize Ccache
+      run: |
+        if command -v ccache >/dev/null 2>&1; then
+          echo "CCACHE 目录: ${{ env.CCACHE_DIR }}"
+          mkdir -p "${{ env.CCACHE_DIR }}"
+          ccache -M ${{ env.CCACHE_MAXSIZE }}
+          echo "✅ ccache 初始化完成"
+        else
+          echo "❌ 未安装 ccache，跳过"
+        fi
+        ccache -s
+
+    - name: Install Repo Tool
+      run: |
+        mkdir -p ~/bin
+        curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+        chmod a+x ~/bin/repo
+        echo "$HOME/bin" >> $GITHUB_PATH
+
+    - name: ⬇️ Download Google Clang Toolchain
+      # 步骤1：创建目录
+      run: |
+        # 创建工具链目录
+        TC_ROOT="$GITHUB_WORKSPACE/kernel_workspace/build-tools"
+        TC="$TC_ROOT/clang-r563880c"
+
+        mkdir -p "$TC"
+        cd "$TC_ROOT"
+
+        echo "Downloading Clang r563880c..."
+
+        curl -fL --retry 3 \
+          -o clang-r563880c.tar.gz \
+          'https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/1dfd3e02af21d5427d427f902e718bf4db58e0ae/clang-r563880c.tar.gz'
+
+        echo "Extracting Clang toolchain..."
+        tar -xzf clang-r563880c.tar.gz -C "$TC"
+
+        # 删除压缩包，减少工作区占用
+        rm -f clang-r563880c.tar.gz
+
+        # 设置 GitHub Actions 后续步骤使用的环境变量
+        echo "CLANG_PATH=$TC/bin" >> "$GITHUB_ENV"
+        echo "TC=$TC" >> "$GITHUB_ENV"
+
+        # 当前步骤立即生效
+        export PATH="$TC/bin:$PATH"
+        export CLANG_PATH="$TC/bin"
+
+        echo "Clang toolchain installed at: $TC"
+        "$TC/bin/clang" --version
+
+
+    - name: Initialize & Sync Kernel Source
+      run: |
+        set -euo pipefail
+
+        WORKSPACE="$GITHUB_WORKSPACE/kernel_workspace"
+        REPO_DIR="$WORKSPACE/common"
+
+        cd "$WORKSPACE"
+
+        if [[ "${{ steps.cache-kernel.outputs.cache-hit }}" != "true" ]]; then
+          echo "[*] 缓存未命中，开始同步内核源码..."
+
+          rm -rf "$REPO_DIR"
+          mkdir -p "$REPO_DIR"
+          cd "$REPO_DIR"
+
+          git init
+          git remote add origin \
+            https://github.com/pix106/android_kernel_xiaomi_sdm660_southwest-ng.git
+
+          git fetch --depth=1 origin 0.17.3
+          git checkout -b 0.17.3 FETCH_HEAD
+
+          echo "[*] 内核源码同步完成"
+          echo "[*] 当前提交：$(git rev-parse HEAD)"
+          echo "[*] 当前分支：$(git branch --show-current)"
+        else
+          echo "[*] 源码缓存命中，跳过同步"
+          fi
+
+        
+    - name: Configure and Build 4.19 Kernel with ReSukiSU
+      env:
+        KERNEL_DIR: ${{ github.workspace }}/kernel_workspace/common
+      run: |
+        set -euo pipefail
+
+        cd "$KERNEL_DIR"
+
+        # 使用前面下载的 Clang 工具链
+        export PATH="/usr/lib/ccache:$CLANG_PATH:$PATH"
+
+        export ARCH=arm64
+        export LLVM=1
+        export LLVM_IAS=1
+        export LOCALVERSION=-clo
+
+        echo "[*] Clang version:"
+        clang --version
+
+        echo "[*] Generating device defconfig..."
+        make O=out vendor/xiaomi/sdm660_defconfig
+
+        echo "[*] Applying clover config..."
+        make O=out vendor/xiaomi/clover.config
+
+        echo "[*] Integrating ReSukiSU..."
+        
+        curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
+
+        # 计算并导出 KSU 版本号
+        cd KernelSU
+        KSU_VERSION=$(( $(git rev-list --count main) + 30700 ))
+        echo "KSU_VERSION=$KSU_VERSION" >> "$GITHUB_ENV"
+        echo "[*] KSU_VERSION=$KSU_VERSION"
+        cd ..
+
+        # 打ReSukiSU补丁
+
+        curl -LSs "https://raw.githubusercontent.com/yuhangle/Action_OneplusAce3v_SukiSU/master/patch/sdm660_resuki.patch" -o sdm660_resuki.patch
+        git apply ./sdm660_resuki.patch
+
+        echo "[*] Applying KSU configuration..."
+        scripts/config --file out/.config \
+          --enable KSU \
+          --disable KSU_SUSFS \
+          --disable KSU_TRACEPOINT_HOOK \
+          --enable KSU_MANUAL_HOOK
+
+        echo "[*] Synchronizing kernel configuration..."
+        make LLVM=1 LLVM_IAS=1 ARCH=arm64 \
+            CC="ccache clang" \
+            HOSTCC="ccache clang" \
+            HOSTCXX="ccache clang++" \
+            O=out olddefconfig
+
+        echo "[*] Checking KSU configuration..."
+        grep -E 'CONFIG_KSU|CONFIG_KALLSYMS' out/.config || true
+        
+        echo "[*] Build Kernel"
+
+        make LLVM=1 LLVM_IAS=1 ARCH=arm64 \
+            CC="ccache clang" \
+            HOSTCC="ccache clang" \
+            HOSTCXX="ccache clang++" \
+            O=out -j8 Image.gz-dtb
+
+
+        echo "[*] Build completed."
+        ls -lh out/arch/arm64/boot/Image.gz-dtb
+
+
+    - name: Pack Kernel with AnyKernel3
+      env:
+        KERNEL_DIR: ${{ github.workspace }}/kernel_workspace/common
+        AK3_DIR: ${{ github.workspace }}/kernel_workspace/AnyKernel3
+      run: |
+        set -euo pipefail
+
+        IMAGE_PATH="$KERNEL_DIR/out/arch/arm64/boot/Image.gz-dtb"
+
+        if [[ ! -f "$IMAGE_PATH" ]]; then
+          echo "Error: Image.gz-dtb not found at $IMAGE_PATH"
+          exit 1
+        fi
+
+        echo "[*] Image.gz-dtb found:"
+        ls -lh "$IMAGE_PATH"
+
+        # 获取 AnyKernel3
+        cd "$GITHUB_WORKSPACE/kernel_workspace"
+
+        if [[ -d "$AK3_DIR" ]]; then
+          rm -rf "$AK3_DIR"
+        fi
+
+        git clone --depth=1 \
+          https://github.com/pix106/AnyKernel3.git \
+          "$AK3_DIR"
+
+        echo "[*] Copying Image.gz-dtb to AnyKernel3..."
+        cp "$IMAGE_PATH" "$AK3_DIR/Image.gz-dtb"
+
+        # 检查打包文件
+        ls -lh "$AK3_DIR/Image.gz-dtb"
+
+        # 导出 AnyKernel3 路径
+        echo "AK3_UPLOAD_PATH=$AK3_DIR" >> "$GITHUB_ENV"
+
+        echo "[*] AnyKernel3 directory is ready."
+
+
+    - name: Upload AnyKernel3 Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: AnyKernel3-ReSukiSU-${{ env.KSU_VERSION }}-clo
+        path: ${{ env.AK3_UPLOAD_PATH }}
+        if-no-files-found: error
+
