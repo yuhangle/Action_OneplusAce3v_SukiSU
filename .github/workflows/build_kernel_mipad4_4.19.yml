@@ -259,6 +259,33 @@ jobs:
           https://github.com/pix106/AnyKernel3.git \
           "$AK3_DIR"
 
+        # 使用 sed 修改 AnyKernel3 默认配置
+        echo "[*] Patching anykernel.sh..."
+
+        sed -i \
+          -e 's/^device.name1=.*/device.name1=clover/' \
+          -e 's/^supported.versions=.*/supported.versions=11-17/' \
+          -e 's/^supported.patchlevels=.*/supported.patchlevels=/' \
+          -e 's/^supported.vendorpatchlevels=.*/supported.vendorpatchlevels=/' \
+          -e 's/^BLOCK=.*/BLOCK=auto/' \
+          -e 's/^IS_SLOT_DEVICE=.*/IS_SLOT_DEVICE=0/' \
+          -e 's/^RAMDISK_COMPRESSION=.*/RAMDISK_COMPRESSION=auto/' \
+          -e 's/^PATCH_VBMETA_FLAG=.*/PATCH_VBMETA_FLAG=auto/' \
+          "$AK3_DIR/anykernel.sh"
+
+        sed -i \
+          -e 's/^block=.*/BLOCK=auto/' \
+          -e 's/^is_slot_device=.*/IS_SLOT_DEVICE=0/' \
+          -e 's/^ramdisk_compression=.*/RAMDISK_COMPRESSION=auto/' \
+          -e 's/^patch_vbmeta_flag=.*/PATCH_VBMETA_FLAG=auto/' \
+          "$AK3_DIR/anykernel.sh"
+
+        echo "[*] Patched device configuration:"
+        grep -E \
+          'device.name|supported.versions|supported.patchlevels|supported.vendorpatchlevels|BLOCK|IS_SLOT_DEVICE|RAMDISK_COMPRESSION|PATCH_VBMETA_FLAG' \
+          "$AK3_DIR/anykernel.sh" || true
+
+
         echo "[*] Copying Image.gz-dtb to AnyKernel3..."
         cp "$IMAGE_PATH" "$AK3_DIR/Image.gz-dtb"
 
