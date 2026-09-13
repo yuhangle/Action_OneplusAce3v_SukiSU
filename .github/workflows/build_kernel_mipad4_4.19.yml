@@ -239,6 +239,8 @@ jobs:
         set -euo pipefail
 
         IMAGE_PATH="$KERNEL_DIR/out/arch/arm64/boot/Image.gz-dtb"
+        WORK_DIR="$GITHUB_WORKSPACE/kernel_workspace"
+        PATCH_PATH="$WORK_DIR/pix-ak3-text.patch"
 
         if [[ ! -f "$IMAGE_PATH" ]]; then
           echo "Error: Image.gz-dtb not found at $IMAGE_PATH"
@@ -248,51 +250,30 @@ jobs:
         echo "[*] Image.gz-dtb found:"
         ls -lh "$IMAGE_PATH"
 
-        # 获取 AnyKernel3
-        cd "$GITHUB_WORKSPACE/kernel_workspace"
+        cd "$WORK_DIR"
 
-        if [[ -d "$AK3_DIR" ]]; then
-          rm -rf "$AK3_DIR"
-        fi
+        rm -rf "$AK3_DIR"
 
         git clone --depth=1 \
-          https://github.com/pix106/AnyKernel3.git \
+          https://github.com/osm0sis/AnyKernel3.git \
           "$AK3_DIR"
 
-        # 使用 sed 修改 AnyKernel3 默认配置
-        echo "[*] Patching anykernel.sh..."
+        wget -O "$PATCH_PATH" \
+          "https://raw.githubusercontent.com/yuhangle/Action_OneplusAce3v_SukiSU/refs/heads/master/patch/other/pix-ak3-text.patch"
 
-        sed -i \
-          -e 's/^device.name1=.*/device.name1=clover/' \
-          -e 's/^supported.versions=.*/supported.versions=11-17/' \
-          -e 's/^supported.patchlevels=.*/supported.patchlevels=/' \
-          -e 's/^supported.vendorpatchlevels=.*/supported.vendorpatchlevels=/' \
-          -e 's/^BLOCK=.*/BLOCK=auto/' \
-          -e 's/^IS_SLOT_DEVICE=.*/IS_SLOT_DEVICE=0/' \
-          -e 's/^RAMDISK_COMPRESSION=.*/RAMDISK_COMPRESSION=auto/' \
-          -e 's/^PATCH_VBMETA_FLAG=.*/PATCH_VBMETA_FLAG=auto/' \
-          "$AK3_DIR/anykernel.sh"
-
-        sed -i \
-          -e 's/^block=.*/BLOCK=auto/' \
-          -e 's/^is_slot_device=.*/IS_SLOT_DEVICE=0/' \
-          -e 's/^ramdisk_compression=.*/RAMDISK_COMPRESSION=auto/' \
-          -e 's/^patch_vbmeta_flag=.*/PATCH_VBMETA_FLAG=auto/' \
-          "$AK3_DIR/anykernel.sh"
+        echo "[*] Applying AnyKernel3 patch..."
+        patch -p0 < "$PATCH_PATH"
 
         echo "[*] Patched device configuration:"
         grep -E \
           'device.name|supported.versions|supported.patchlevels|supported.vendorpatchlevels|BLOCK|IS_SLOT_DEVICE|RAMDISK_COMPRESSION|PATCH_VBMETA_FLAG' \
           "$AK3_DIR/anykernel.sh" || true
 
-
         echo "[*] Copying Image.gz-dtb to AnyKernel3..."
         cp "$IMAGE_PATH" "$AK3_DIR/Image.gz-dtb"
 
-        # 检查打包文件
         ls -lh "$AK3_DIR/Image.gz-dtb"
 
-        # 导出 AnyKernel3 路径
         echo "AK3_UPLOAD_PATH=$AK3_DIR" >> "$GITHUB_ENV"
 
         echo "[*] AnyKernel3 directory is ready."
