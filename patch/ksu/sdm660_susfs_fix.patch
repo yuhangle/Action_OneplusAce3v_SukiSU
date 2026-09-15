@@ -1,0 +1,90 @@
+diff --git a/fs/namespace.c b/fs/namespace.c
+index 47d403d36339..d427fd12c5b3 100644
+--- a/fs/namespace.c
++++ b/fs/namespace.c
+@@ -26,11 +26,23 @@
+ #include <linux/bootmem.h>
+ #include <linux/task_work.h>
+ #include <linux/sched/task.h>
++#ifdef CONFIG_KSU_SUSFS
++#include <linux/susfs_def.h>
++#endif // #ifdef CONFIG_KSU_SUSFS
++
+ #include <linux/fs_context.h>
+ 
+ #include "pnode.h"
+ #include "internal.h"
+ 
++#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
++extern bool susfs_is_current_ksu_domain(void);
++extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;
++
++#define CL_COPY_MNT_NS BIT(25) /* used by copy_mnt_ns() */
++
++#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
++
+ /* Maximum number of mounts in a mount namespace */
+ unsigned int sysctl_mount_max __read_mostly = 100000;
+ 
+@@ -1143,6 +1155,19 @@ struct vfsmount *vfs_kern_mount(struct file_system_type *type,
+ 	if (!type)
+ 		return ERR_PTR(-EINVAL);
+ 
++#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
++	// - We will just stop checking for ksu process if /sdcard/Android is accessible,
++	//   for the sake of performance
++	if (static_branch_unlikely(&susfs_is_sdcard_android_data_not_decrypted)) {
++		if (susfs_is_current_ksu_domain()) {
++			struct mount *m = susfs_alloc_non_unshare_ksu_vfsmnt(name ?: "none");
++			if (IS_ERR(m))
++				return ERR_CAST(m);
++			return &m->mnt;
++		}
++	}
++#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
++
+ 	fc = fs_context_for_mount(type, flags);
+ 	if (IS_ERR(fc))
+ 		return ERR_CAST(fc);
+diff --git a/fs/proc/task_mmu.c b/fs/proc/task_mmu.c
+index 64ad533bd9e4..fba15b3b139f 100644
+--- a/fs/proc/task_mmu.c
++++ b/fs/proc/task_mmu.c
+@@ -1680,7 +1680,15 @@ static ssize_t pagemap_read(struct file *file, char __user *buf,
+ 		ret = mmap_read_lock_killable(mm);
+ 		if (ret)
+ 			goto out_free;
++#ifdef CONFIG_KSU_SUSFS_SUS_MAP
++		vma = find_vma(mm, start_vaddr);
++		if (vma && vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))
++			goto bypass_orig_flow;
++#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
+ 		ret = walk_page_range(start_vaddr, end, &pagemap_walk);
++#ifdef CONFIG_KSU_SUSFS_SUS_MAP
++bypass_orig_flow:
++#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
+ 		mmap_read_unlock(mm);
+ 		start_vaddr = end;
+ 
+diff --git a/fs/super.c b/fs/super.c
+index d9a5710315ce..2cd20f338712 100644
+--- a/fs/super.c
++++ b/fs/super.c
+@@ -36,9 +36,17 @@
+ #include <linux/fsnotify.h>
+ #include <linux/lockdep.h>
+ #include <linux/user_namespace.h>
++#ifdef CONFIG_KSU_SUSFS
++#include <linux/susfs_def.h>
++#endif // #ifdef CONFIG_KSU_SUSFS
+ #include <linux/fs_context.h>
+ #include "internal.h"
+ 
++#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
++extern bool susfs_is_current_ksu_domain(void);
++extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;
++#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
++
+ static int thaw_super_locked(struct super_block *sb);
+ 
+ static LIST_HEAD(super_blocks);
