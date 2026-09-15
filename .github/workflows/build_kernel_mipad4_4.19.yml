@@ -12,6 +12,11 @@ on:
         required: true
         default: false
         type: boolean
+      DROID_SPACES_ENABLED:
+        description: '是否加入DroidSpaces支持 (true/false)'
+        required: true
+        default: false
+        type: boolean
       USE_FAKE_TIME:
         description: '是否伪造构建时间 (true/false)'
         required: true
@@ -163,6 +168,7 @@ jobs:
     - name: Configure and Build 4.19 Kernel with ReSukiSU
       env:
         KERNEL_DIR: ${{ github.workspace }}/kernel_workspace/common
+        DROID_SPACES_ENABLED: ${{ inputs.DROID_SPACES_ENABLED }}
       run: |
         set -euo pipefail
 
@@ -207,6 +213,72 @@ jobs:
           --disable KSU_SUSFS \
           --disable KSU_TRACEPOINT_HOOK \
           --enable KSU_MANUAL_HOOK
+
+        # 加入DroidSpaces支持
+        if [[ "$DROID_SPACES_ENABLED" == "true" ]]; then
+            # 开启droidspaces配置
+            scripts/config --file out/.config \
+                --enable SYSCTL \
+                --enable SYSVIPC \
+                --enable POSIX_MQUEUE \
+                \
+                --enable NAMESPACES \
+                --enable PID_NS \
+                --enable UTS_NS \
+                --enable IPC_NS \
+                --enable USER_NS \
+                \
+                --enable SECCOMP \
+                --enable SECCOMP_FILTER \
+                \
+                --enable CGROUPS \
+                --enable CGROUP_DEVICE \
+                --enable CGROUP_PIDS \
+                --disable MEMCG \
+                --enable CGROUP_SCHED \
+                --enable FAIR_GROUP_SCHED \
+                --enable CGROUP_FREEZER \
+                --enable CGROUP_NET_PRIO \
+                \
+                --enable DEVTMPFS \
+                \
+                --enable OVERLAY_FS \
+                --enable TMPFS_POSIX_ACL \
+                --enable TMPFS_XATTR \
+                \
+                --enable FW_LOADER \
+                --enable FW_LOADER_USER_HELPER \
+                --enable FW_LOADER_COMPRESS \
+                \
+                --enable NET_NS \
+                --enable VETH \
+                --enable BRIDGE \
+                --enable NETFILTER \
+                --enable BRIDGE_NETFILTER \
+                --enable NETFILTER_ADVANCED \
+                --enable NF_CONNTRACK \
+                --enable IP_NF_IPTABLES \
+                --enable IP_NF_FILTER \
+                --enable NF_NAT \
+                --enable NF_TABLES \
+                --enable IP_NF_TARGET_MASQUERADE \
+                --enable NETFILTER_XT_TARGET_MASQUERADE \
+                --enable NETFILTER_XT_TARGET_TCPMSS \
+                --enable NETFILTER_XT_MATCH_ADDRTYPE \
+                --enable NF_CONNTRACK_NETLINK \
+                --enable NF_NAT_REDIRECT \
+                --enable IP_ADVANCED_ROUTER \
+                --enable IP_MULTIPLE_TABLES \
+                \
+                --enable NF_CONNTRACK_IPV4 \
+                --enable NF_NAT_IPV4 \
+                --enable IP_NF_NAT \
+                \
+                --disable ANDROID_PARANOID_NETWORK
+            # 打补丁
+            wget https://raw.githubusercontent.com/ravindu644/Droidspaces-OSS/refs/heads/main/Documentation/resources/kernel-patches/non-GKI/02.fix_restore%20cgroup%20file%20prefix%20handling%20.patch
+            patch -p1 -F3 < ./"02.fix_restore cgroup file prefix handling .patch"
+        fi
 
         echo "[*] Synchronizing kernel configuration..."
         make LLVM=1 LLVM_IAS=1 ARCH=arm64 \

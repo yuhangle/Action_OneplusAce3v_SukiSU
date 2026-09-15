@@ -208,6 +208,7 @@ jobs:
         USE_FAKE_TIME: ${{ inputs.USE_FAKE_TIME }}
         KBUILD_BUILD_TIMESTAMP: ${{ inputs.FAKE_TIME_VAL }}
         ENABLE_SUSFS: ${{ inputs.ENABLE_SUSFS }}
+        ENABLE_NEW_ZSTD: ${{ inputs.ENABLE_NEW_ZSTD }}
         # Kernel 配置参数
         CPU: 'sm7675'
         FEIL: 'oneplus_ace3_v_v'
