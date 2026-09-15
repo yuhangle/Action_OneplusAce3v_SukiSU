@@ -17,6 +17,11 @@ on:
         required: true
         default: false
         type: boolean
+      ENABLE_SUSFS:
+        description: '是否启用susfs (true/false)'
+        required: true
+        default: false
+        type: boolean
       USE_FAKE_TIME:
         description: '是否伪造构建时间 (true/false)'
         required: true
@@ -169,6 +174,7 @@ jobs:
       env:
         KERNEL_DIR: ${{ github.workspace }}/kernel_workspace/common
         DROID_SPACES_ENABLED: ${{ inputs.DROID_SPACES_ENABLED }}
+        ENABLE_SUSFS: ${{ inputs.ENABLE_SUSFS }}
       run: |
         set -euo pipefail
 
@@ -202,17 +208,50 @@ jobs:
         echo "[*] KSU_VERSION=$KSU_VERSION"
         cd ..
 
-        # 打ReSukiSU补丁
+        if [[ "$ENABLE_SUSFS" == "true" ]]; then
+            wget https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/refs/heads/mainline/Patches/Patch/susfs_patch_to_4.19.patch
 
-        curl -LSs "https://raw.githubusercontent.com/yuhangle/Action_OneplusAce3v_SukiSU/refs/heads/master/patch/ksu/sdm660_resuki.patch" -o sdm660_resuki.patch
-        git apply ./sdm660_resuki.patch
+            patch -p1 < susfs_patch_to_4.19.patch || true
+            # 失败需要手动补丁
+            wget https://raw.githubusercontent.com/yuhangle/Action_OneplusAce3v_SukiSU/refs/heads/master/patch/ksu/sdm660_susfs_fix.patch
+            git apply ./sdm660_susfs_fix.patch
 
-        echo "[*] Applying KSU configuration..."
-        scripts/config --file out/.config \
-          --enable KSU \
-          --disable KSU_SUSFS \
-          --disable KSU_TRACEPOINT_HOOK \
-          --enable KSU_MANUAL_HOOK
+            wget https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/refs/heads/mainline/Patches/susfs_inline_hook_patches.sh
+            bash susfs_inline_hook_patches.sh ./
+
+            # 打上符号导出需要的补丁
+            wget https://raw.githubusercontent.com/yuhangle/Action_OneplusAce3v_SukiSU/refs/heads/master/patch/ksu/sdm660_resuki_selinux.patch
+            patch -p1 < ./sdm660_resuki_selinux.patch
+
+            # SUSFS配置
+            scripts/config --file out/.config \
+                --enable KSU \
+                --enable KSU_SUSFS \
+                --enable KSU_SUSFS_SUS_PATH \
+                --enable KSU_SUSFS_SUS_MOUNT \
+                --enable KSU_SUSFS_SUS_KSTAT \
+                --enable KSU_SUSFS_SPOOF_UNAME \
+                --enable KSU_SUSFS_ENABLE_LOG \
+                --enable KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
+                --enable KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
+                --enable KSU_SUSFS_OPEN_REDIRECT \
+                --disable KSU_TRACEPOINT_HOOK \
+                --disable KSU_MANUAL_HOOK \
+                --enable KSU_SUSFS_SUS_MAP
+        
+        else
+            # 打ReSukiSU MANUAL_HOOK补丁
+
+            curl -LSs "https://raw.githubusercontent.com/yuhangle/Action_OneplusAce3v_SukiSU/refs/heads/master/patch/ksu/sdm660_resuki.patch" -o sdm660_resuki.patch
+            git apply ./sdm660_resuki.patch
+
+            echo "[*] Applying KSU configuration..."
+            scripts/config --file out/.config \
+              --enable KSU \
+              --disable KSU_SUSFS \
+              --disable KSU_TRACEPOINT_HOOK \
+              --enable KSU_MANUAL_HOOK
+        fi
 
         # 加入DroidSpaces支持
         if [[ "$DROID_SPACES_ENABLED" == "true" ]]; then
