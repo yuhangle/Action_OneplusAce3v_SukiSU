@@ -393,7 +393,7 @@ jobs:
     - name: Upload AnyKernel3 Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: AnyKernel3-ReSukiSU-${{ env.KSU_VERSION }}-clo
+        name: AnyKernel3-ReSukiSU-${{ env.KSU_VERSION }}-${{ inputs.ENABLE_SUSFS == true && 'susfs' || 'nosusfs' }}
         path: ${{ env.AK3_UPLOAD_PATH }}
         if-no-files-found: error
 
