@@ -439,7 +439,7 @@ jobs:
         if [[ "$ENABLE_NEW_ZSTD" == "true" ]]; then
             wget https://raw.githubusercontent.com/yuhangle/Action_OneplusAce3v_SukiSU/refs/heads/master/patch/zram/6.1-zstd-upgrade-v1.5.7-from-android17-6.18.patch
             echo "打zstd 1.5.7补丁"
-            git apply ./6.1-zstd-upgrade-v1.5.7-from-android17-6.18.patch
+            patch -p1 < ./6.1-zstd-upgrade-v1.5.7-from-android17-6.18.patch
             sed -i 's/^CONFIG_ZRAM=m$/CONFIG_ZRAM=y/' ./arch/arm64/configs/gki_defconfig
         fi
 
