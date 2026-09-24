@@ -429,6 +429,12 @@ jobs:
             wget https://raw.githubusercontent.com/yuhangle/Action_OneplusAce3v_SukiSU/refs/heads/master/patch/zram/6.1-zstd-upgrade-v1.5.7-from-android17-6.18.patch
             echo "打zstd 1.5.7补丁"
             patch -p1 < ./6.1-zstd-upgrade-v1.5.7-from-android17-6.18.patch || true
+
+            echo "打lz4 1.10.0补丁"
+            wget https://raw.githubusercontent.com/yuhangle/Action_OneplusAce3v_SukiSU/refs/heads/master/patch/zram/lz4-upgrade-v1.10.0-arm64-neon.patch
+            patch -p1 < ./lz4-upgrade-v1.10.0-arm64-neon.patch || true
+
+
             sed -i 's/^CONFIG_ZRAM=m$/CONFIG_ZRAM=y/' ./arch/arm64/configs/gki_defconfig
         fi
 
