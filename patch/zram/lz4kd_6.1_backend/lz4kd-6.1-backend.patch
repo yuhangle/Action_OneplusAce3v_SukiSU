@@ -1,0 +1,259 @@
+--- a/arch/arm64/configs/gki_defconfig
++++ b/arch/arm64/configs/gki_defconfig
+@@ -329,6 +329,9 @@
+ CONFIG_ZRAM_BACKEND_LZO=y
+ CONFIG_ZRAM_BACKEND_LZ4=y
+ CONFIG_ZRAM_BACKEND_LZ4HC=y
++CONFIG_ZRAM_BACKEND_LZ4K=y
++CONFIG_ZRAM_BACKEND_LZ4KD=y
++CONFIG_ZRAM_BACKEND_LZ4K_OPLUS=y
+ CONFIG_ZRAM_BACKEND_ZSTD=y
+ CONFIG_ZRAM_BACKEND_DEFLATE=y
+ CONFIG_ZRAM_BACKEND_842=y
+diff --git a/crypto/Kconfig b/crypto/Kconfig
+index 94bc07dba24b..39805b87ce39 100644
+--- a/crypto/Kconfig
++++ b/crypto/Kconfig
+@@ -1262,6 +1262,22 @@ config CRYPTO_LZ4
+ 
+ 	  See https://github.com/lz4/lz4 for further information.
+ 
++config CRYPTO_LZ4K
++	tristate "LZ4K compression algorithm"
++	select CRYPTO_ALGAPI
++	select LZ4K_COMPRESS
++	select LZ4K_DECOMPRESS
++	help
++	  This is the LZ4K algorithm.
++
++config CRYPTO_LZ4KD
++	tristate "LZ4KD compression algorithm"
++	select CRYPTO_ALGAPI
++	select LZ4KD_COMPRESS
++	select LZ4KD_DECOMPRESS
++	help
++	  This is the LZ4KD algorithm.
++
+ config CRYPTO_LZ4HC
+ 	tristate "LZ4HC"
+ 	select CRYPTO_ALGAPI
+diff --git a/crypto/Makefile b/crypto/Makefile
+index 1fa1ea16e0c5..f25aeb84b9be 100644
+--- a/crypto/Makefile
++++ b/crypto/Makefile
+@@ -161,7 +161,9 @@ obj-$(CONFIG_CRYPTO_CRC64_ROCKSOFT) += crc64_rocksoft_generic.o
+ obj-$(CONFIG_CRYPTO_AUTHENC) += authenc.o authencesn.o
+ obj-$(CONFIG_CRYPTO_LZO) += lzo.o lzo-rle.o
+ obj-$(CONFIG_CRYPTO_LZ4) += lz4.o
++obj-$(CONFIG_CRYPTO_LZ4K) += lz4k.o
+ obj-$(CONFIG_CRYPTO_LZ4HC) += lz4hc.o
++obj-$(CONFIG_CRYPTO_LZ4KD) += lz4kd.o
+ obj-$(CONFIG_CRYPTO_XXHASH) += xxhash_generic.o
+ obj-$(CONFIG_CRYPTO_842) += 842.o
+ obj-$(CONFIG_CRYPTO_RNG2) += rng.o
+diff --git a/drivers/block/zram/Kconfig b/drivers/block/zram/Kconfig
+index d3f520b974c2..fa316e6464a9 100644
+--- a/drivers/block/zram/Kconfig
++++ b/drivers/block/zram/Kconfig
+@@ -26,6 +26,23 @@ config ZRAM_BACKEND_LZ4HC
+ 	select LZ4HC_COMPRESS
+ 	select LZ4_DECOMPRESS
+ 
++config ZRAM_BACKEND_LZ4K
++	bool "lz4k compression support"
++	depends on ZRAM
++	select LZ4K_COMPRESS
++	select LZ4K_DECOMPRESS
++
++config ZRAM_BACKEND_LZ4KD
++	bool "lz4kd compression support"
++	depends on ZRAM
++	select LZ4KD_COMPRESS
++	select LZ4KD_DECOMPRESS
++
++config ZRAM_BACKEND_LZ4K_OPLUS
++	bool "lz4k_oplus compression support"
++	depends on ZRAM
++	select CRYPTO_LZ4K_OPLUS
++
+ config ZRAM_BACKEND_ZSTD
+ 	bool "zstd compression support"
+ 	depends on ZRAM
+@@ -78,6 +95,18 @@ config ZRAM_DEF_COMP_LZ4HC
+ 	bool "lz4hc"
+ 	depends on ZRAM_BACKEND_LZ4HC
+ 
++config ZRAM_DEF_COMP_LZ4K
++	bool "lz4k"
++	depends on ZRAM_BACKEND_LZ4K
++
++config ZRAM_DEF_COMP_LZ4KD
++	bool "lz4kd"
++	depends on ZRAM_BACKEND_LZ4KD
++
++config ZRAM_DEF_COMP_LZ4K_OPLUS
++	bool "lz4k_oplus"
++	depends on ZRAM_BACKEND_LZ4K_OPLUS
++
+ config ZRAM_DEF_COMP_ZSTD
+ 	bool "zstd"
+ 	depends on ZRAM_BACKEND_ZSTD
+@@ -99,6 +128,9 @@ config ZRAM_DEF_COMP
+ 	default "lzo" if ZRAM_DEF_COMP_LZO
+ 	default "lz4" if ZRAM_DEF_COMP_LZ4
+ 	default "lz4hc" if ZRAM_DEF_COMP_LZ4HC
++	default "lz4k" if ZRAM_DEF_COMP_LZ4K
++	default "lz4kd" if ZRAM_DEF_COMP_LZ4KD
++	default "lz4k_oplus" if ZRAM_DEF_COMP_LZ4K_OPLUS
+ 	default "zstd" if ZRAM_DEF_COMP_ZSTD
+ 	default "deflate" if ZRAM_DEF_COMP_DEFLATE
+ 	default "842" if ZRAM_DEF_COMP_842
+diff --git a/drivers/block/zram/Makefile b/drivers/block/zram/Makefile
+index 0fdefd576691..25fdfd5e4147 100644
+--- a/drivers/block/zram/Makefile
++++ b/drivers/block/zram/Makefile
+@@ -2,9 +2,14 @@
+ 
+ zram-y	:=	zcomp.o zram_drv.o
+ 
++ccflags-$(CONFIG_ZRAM_BACKEND_LZ4K_OPLUS) += -I$(srctree)/lib/lz4k_oplus
++
+ zram-$(CONFIG_ZRAM_BACKEND_LZO)		+= backend_lzorle.o backend_lzo.o
+ zram-$(CONFIG_ZRAM_BACKEND_LZ4)		+= backend_lz4.o
+ zram-$(CONFIG_ZRAM_BACKEND_LZ4HC)	+= backend_lz4hc.o
++zram-$(CONFIG_ZRAM_BACKEND_LZ4K)	+= backend_lz4k.o
++zram-$(CONFIG_ZRAM_BACKEND_LZ4KD)	+= backend_lz4kd.o
++zram-$(CONFIG_ZRAM_BACKEND_LZ4K_OPLUS)	+= backend_lz4k_oplus.o
+ zram-$(CONFIG_ZRAM_BACKEND_ZSTD)	+= backend_zstd.o
+ zram-$(CONFIG_ZRAM_BACKEND_DEFLATE)	+= backend_deflate.o
+ zram-$(CONFIG_ZRAM_BACKEND_842)		+= backend_842.o
+diff --git a/drivers/block/zram/zcomp.c b/drivers/block/zram/zcomp.c
+index bb514403e305..71726b7402a0 100644
+--- a/drivers/block/zram/zcomp.c
++++ b/drivers/block/zram/zcomp.c
+@@ -16,6 +16,9 @@
+ #include "backend_lzorle.h"
+ #include "backend_lz4.h"
+ #include "backend_lz4hc.h"
++#include "backend_lz4k.h"
++#include "backend_lz4kd.h"
++#include "backend_lz4k_oplus.h"
+ #include "backend_zstd.h"
+ #include "backend_deflate.h"
+ #include "backend_842.h"
+@@ -31,6 +34,15 @@ static const struct zcomp_ops *backends[] = {
+ #if IS_ENABLED(CONFIG_ZRAM_BACKEND_LZ4HC)
+ 	&backend_lz4hc,
+ #endif
++#if IS_ENABLED(CONFIG_ZRAM_BACKEND_LZ4K)
++	&backend_lz4k,
++#endif
++#if IS_ENABLED(CONFIG_ZRAM_BACKEND_LZ4KD)
++	&backend_lz4kd,
++#endif
++#if IS_ENABLED(CONFIG_ZRAM_BACKEND_LZ4K_OPLUS)
++	&backend_lz4k_oplus,
++#endif
+ #if IS_ENABLED(CONFIG_ZRAM_BACKEND_ZSTD)
+ 	&backend_zstd,
+ #endif
+diff --git a/kernel/module/main.c b/kernel/module/main.c
+index 27c0636fc8e1..6517416c366d 100644
+--- a/kernel/module/main.c
++++ b/kernel/module/main.c
+@@ -2310,13 +2310,25 @@ int __weak module_frob_arch_sections(Elf_Ehdr *hdr,
+ 
+ /* module_blacklist is a comma-separated list of module names */
+ static char *module_blacklist;
++static char *custom_module_blacklist[] = {
++#if IS_BUILTIN(CONFIG_CRYPTO_LZO)
++    "lzo", "lzo_rle",
++#endif
++#if IS_BUILTIN(CONFIG_ZRAM)
++    "zram",
++#endif
++#if IS_BUILTIN(CONFIG_ZSMALLOC)
++    "zsmalloc",
++#endif
++};
+ static bool blacklisted(const char *module_name)
+ {
+ 	const char *p;
+ 	size_t len;
++    int i;
+ 
+ 	if (!module_blacklist)
+-		return false;
++		goto custom_blacklist;
+ 
+ 	for (p = module_blacklist; *p; p += len) {
+ 		len = strcspn(p, ",");
+@@ -2325,6 +2337,12 @@ static bool blacklisted(const char *module_name)
+ 		if (p[len] == ',')
+ 			len++;
+ 	}
++
++custom_blacklist:
++	for (i = 0; i < ARRAY_SIZE(custom_module_blacklist); i++)
++		if (!strcmp(module_name, custom_module_blacklist[i]))
++			return true;
++
+ 	return false;
+ }
+ core_param(module_blacklist, module_blacklist, charp, 0400);
+@@ -2791,7 +2809,7 @@ static int load_module(struct load_info *info, const char __user *uargs,
+ 	 * if it's blacklisted.
+ 	 */
+ 	if (blacklisted(info->name)) {
+-		err = -EPERM;
++		// err = -EPERM;
+ 		pr_err("Module %s is blacklisted\n", info->name);
+ 		goto free_copy;
+ 	}
+diff --git a/lib/Kconfig b/lib/Kconfig
+index 0610fad65a36..aa413b8294c5 100644
+--- a/lib/Kconfig
++++ b/lib/Kconfig
+@@ -2,6 +2,7 @@
+ #
+ # Library configuration
+ #
++source "lib/lz4k_oplus/Kconfig"
+ 
+ config BINARY_PRINTF
+ 	def_bool n
+@@ -339,6 +340,18 @@ config LZ4HC_COMPRESS
+ 
+ config LZ4_DECOMPRESS
+ 	tristate
++	
++config LZ4K_COMPRESS
++	tristate
++
++config LZ4K_DECOMPRESS
++	tristate
++
++config LZ4KD_COMPRESS
++	tristate
++
++config LZ4KD_DECOMPRESS
++ 	tristate
+ 
+ config ZSTD_COMMON
+ 	select XXHASH
+diff --git a/lib/Makefile b/lib/Makefile
+index 30a619de8250..a8dc58af8eee 100644
+--- a/lib/Makefile
++++ b/lib/Makefile
+@@ -196,6 +196,11 @@ obj-$(CONFIG_LZO_DECOMPRESS) += lzo/
+ obj-$(CONFIG_LZ4_COMPRESS) += lz4/
+ obj-$(CONFIG_LZ4HC_COMPRESS) += lz4/
+ obj-$(CONFIG_LZ4_DECOMPRESS) += lz4/
++obj-$(CONFIG_LZ4K_COMPRESS) += lz4k/
++obj-$(CONFIG_LZ4K_DECOMPRESS) += lz4k/
++obj-$(CONFIG_LZ4KD_COMPRESS) += lz4kd/
++obj-$(CONFIG_LZ4KD_DECOMPRESS) += lz4kd/
++obj-y += lz4k_oplus/
+ obj-$(CONFIG_ZSTD_COMPRESS) += zstd/
+ obj-$(CONFIG_ZSTD_DECOMPRESS) += zstd/
+ obj-$(CONFIG_XZ_DEC) += xz/

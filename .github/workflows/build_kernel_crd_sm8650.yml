@@ -26,8 +26,8 @@ on:
         required: true
         default: false
         type: boolean
-      ENABLE_NEW_ZSTD:
-        description: '是否启用移植的1.5.7 zstd算法 (true/false)'
+      ENABLE_NEW_ZRAM:
+        description: '是否启用移植的zram算法和新后端 (true/false)'
         required: true
         default: false
         type: boolean
@@ -208,7 +208,7 @@ jobs:
         USE_FAKE_TIME: ${{ inputs.USE_FAKE_TIME }}
         KBUILD_BUILD_TIMESTAMP: ${{ inputs.FAKE_TIME_VAL }}
         ENABLE_SUSFS: ${{ inputs.ENABLE_SUSFS }}
-        ENABLE_NEW_ZSTD: ${{ inputs.ENABLE_NEW_ZSTD }}
+        ENABLE_NEW_ZRAM: ${{ inputs.ENABLE_NEW_ZRAM }}
         # Kernel 配置参数
         CPU: 'sm7675'
         FEIL: 'oneplus_ace3_v_v'
@@ -241,6 +241,10 @@ jobs:
         else
             export KBUILD_BUILD_TIMESTAMP
         fi
+
+        # 拉取补丁仓库
+        git clone https://github.com/yuhangle/Action_OneplusAce3v_SukiSU kernel_patch
+        export PATCH_PATH="$(pwd)/kernel_patch"
 
         cd kernel_platform/common
         # 拉取合并脚本
@@ -425,17 +429,24 @@ jobs:
 
         patch -p1 -F3 < ./001.GKI-below-6.12-fix_sysvipc_kabi_6_7_8.patch || true  
 
-        if [[ "$ENABLE_NEW_ZSTD" == "true" ]]; then
-            wget https://raw.githubusercontent.com/yuhangle/Action_OneplusAce3v_SukiSU/refs/heads/master/patch/zram/6.1-zstd-upgrade-v1.5.7-from-android17-6.18.patch
+        if [[ "$ENABLE_NEW_ZRAM" == "true" ]]; then
+            cp $PATCH_PATH/patch/zram/*.patch ./
             echo "打zstd 1.5.7补丁"
             patch -p1 < ./6.1-zstd-upgrade-v1.5.7-from-android17-6.18.patch || true
 
             echo "打lz4 1.10.0补丁"
-            wget https://raw.githubusercontent.com/yuhangle/Action_OneplusAce3v_SukiSU/refs/heads/master/patch/zram/lz4-upgrade-v1.10.0-arm64-neon.patch
             patch -p1 < ./lz4-upgrade-v1.10.0-arm64-neon.patch || true
 
+            echo "打zram后端移植补丁"
+            patch -p1 < 6.1-zram-backend-api-and-dict-from-6.14.patch || true
 
-            sed -i 's/^CONFIG_ZRAM=m$/CONFIG_ZRAM=y/' ./arch/arm64/configs/gki_defconfig
+            echo "打多压缩流移植补丁"
+            patch -p1 < 6.1-zram-multi-comp-and-recompression.patch || true
+
+            echo "打多适配新zram后端的lz4kd补丁"
+            cp $PATCH_PATH/patch/zram/lz4kd_6.1_backend/files/* ./
+            cp $PATCH_PATH/patch/zram/lz4kd_6.1_backend/*.patch ./
+            patch -p1 < lz4kd-6.1-backend.patch || true
         fi
 
         echo "修复69_hide_stuff.patch引入编译错误"
@@ -466,6 +477,23 @@ jobs:
         
         scripts/config --file out/.config -e LTO_CLANG -d LTO_NONE -e LTO_CLANG_THIN -d LTO_CLANG_FULL -e THINLTO -d ARM64_BTI_KERNEL
         scripts/config --file out/.config --set-str CONFIG_LSM "lockdown,baseband_guard,yama,selinux"
+
+        # 确保配置开启
+        if [[ "$ENABLE_NEW_ZRAM" == "true" ]]; then
+            scripts/config --file out/.config \
+              -e CONFIG_ZRAM_BACKEND_LZ4K \
+              -e CONFIG_ZRAM_BACKEND_LZ4KD \
+              -e CONFIG_ZRAM_BACKEND_LZ4K_OPLUS \
+              -e CONFIG_ZRAM_MULTI_COMP \
+              -e CONFIG_ZRAM_BACKEND_LZO \
+              -e CONFIG_ZRAM_BACKEND_LZ4 \
+              -e CONFIG_ZRAM_BACKEND_LZ4HC \
+              -e CONFIG_ZRAM_BACKEND_ZSTD \
+              -e CONFIG_ZRAM_BACKEND_DEFLATE \
+              -e CONFIG_ZRAM_BACKEND_842 \
+              -e CONFIG_ZRAM_DEF_COMP_LZORLE \
+              -e CONFIG_ZRAM
+        fi
 
         echo "[*] 正在编译 (启用 CCACHE 和 SWAP)..."
         make LLVM=1 LLVM_IAS=1 ARCH=arm64 CC=clang HOSTCC=clang HOSTCXX=clang++ O=out LOCALVERSION=-$android_release-$kmi_generation -j$(nproc --all)

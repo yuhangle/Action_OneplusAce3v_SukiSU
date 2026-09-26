@@ -1,0 +1,1889 @@
+From e574328aca1a4972c0807f2131ae1151d4c75e54 Mon Sep 17 00:00:00 2001
+From: yuhangle <893033655@qq.com>
+Date: Fri, 25 Sep 2026 14:34:49 +0800
+Subject: [PATCH] zram: backport compression backends API, dictionary support,
+ LZ4 template stream
+
+Backport of the upstream zram compression backends series (merged for
+v6.14, 2024-09-02, Sergey Senozhatsky) plus the LZ4 dictionary template
+stream optimization (upstream commit f0f6f7871430, gao xu).
+
+- zcomp: replace the crypto compress API with in-kernel per-algorithm
+  backends: lzo, lzo-rle, lz4, lz4hc, zstd, deflate and 842
+- introduce struct zcomp_params (level, dict, deflate.winbits) which is
+  owned by zram and shared by all streams of a device
+- add write-only /sys/block/zram<id>/algorithm_params knob, accepting
+  level=<n>, dict=<path> and deflate.winbits=<n>; parameters can only be
+  set before the device is initialized
+- keep the 6.1 single compression stream layout and per-CPU local_lock
+  stream model (no multi-comp, no per-priority param slots)
+- lz4 backend: build the dictionary stream once in setup_params() and
+  memcpy that template into the per-CPU stream on each compression,
+  instead of calling LZ4_loadDict() for every request
+- lib/lz4: export LZ4_compress_fast_continue and LZ4_resetStreamHC (zram
+  is built as a module), define LZ4_ACCELERATION_DEFAULT for the kernel
+  <linux/lz4.h> wrapper
+- gki_defconfig: enable the lzo, lz4, lz4hc, zstd, deflate and 842
+  backends, default compressor stays lzo-rle
+---
+ Documentation/ABI/testing/sysfs-block-zram |  23 +++
+ arch/arm64/configs/gki_defconfig           |   9 +-
+ drivers/block/zram/Kconfig                 |  77 ++++++--
+ drivers/block/zram/Makefile                |   8 +
+ drivers/block/zram/backend_842.c           |  61 ++++++
+ drivers/block/zram/backend_842.h           |  10 +
+ drivers/block/zram/backend_deflate.c       | 148 ++++++++++++++
+ drivers/block/zram/backend_deflate.h       |  10 +
+ drivers/block/zram/backend_lz4.c           | 150 ++++++++++++++
+ drivers/block/zram/backend_lz4.h           |  10 +
+ drivers/block/zram/backend_lz4hc.c         | 128 ++++++++++++
+ drivers/block/zram/backend_lz4hc.h         |  10 +
+ drivers/block/zram/backend_lzo.c           |  59 ++++++
+ drivers/block/zram/backend_lzo.h           |  10 +
+ drivers/block/zram/backend_lzorle.c        |  59 ++++++
+ drivers/block/zram/backend_lzorle.h        |  10 +
+ drivers/block/zram/backend_zstd.c          | 217 +++++++++++++++++++++
+ drivers/block/zram/backend_zstd.h          |  10 +
+ drivers/block/zram/zcomp.c                 | 199 ++++++++++---------
+ drivers/block/zram/zcomp.h                 |  79 ++++++--
+ drivers/block/zram/zram_drv.c              | 106 +++++++++-
+ drivers/block/zram/zram_drv.h              |   1 +
+ include/linux/lz4.h                        |   1 +
+ lib/lz4/lz4.c                              |   1 +
+ lib/lz4/lz4hc.c                            |   1 +
+ 25 files changed, 1268 insertions(+), 129 deletions(-)
+ create mode 100644 drivers/block/zram/backend_842.c
+ create mode 100644 drivers/block/zram/backend_842.h
+ create mode 100644 drivers/block/zram/backend_deflate.c
+ create mode 100644 drivers/block/zram/backend_deflate.h
+ create mode 100644 drivers/block/zram/backend_lz4.c
+ create mode 100644 drivers/block/zram/backend_lz4.h
+ create mode 100644 drivers/block/zram/backend_lz4hc.c
+ create mode 100644 drivers/block/zram/backend_lz4hc.h
+ create mode 100644 drivers/block/zram/backend_lzo.c
+ create mode 100644 drivers/block/zram/backend_lzo.h
+ create mode 100644 drivers/block/zram/backend_lzorle.c
+ create mode 100644 drivers/block/zram/backend_lzorle.h
+ create mode 100644 drivers/block/zram/backend_zstd.c
+ create mode 100644 drivers/block/zram/backend_zstd.h
+
+diff --git a/Documentation/ABI/testing/sysfs-block-zram b/Documentation/ABI/testing/sysfs-block-zram
+index 14b2bf2e5105..09c67bfcd883 100644
+--- a/Documentation/ABI/testing/sysfs-block-zram
++++ b/Documentation/ABI/testing/sysfs-block-zram
+@@ -137,3 +137,26 @@ Description:
+ 		The writeback_limit file is read-write and specifies the maximum
+ 		amount of writeback ZRAM can do. The limit could be changed
+ 		in run time.
++
++What:		/sys/block/zram<id>/algorithm_params
++Date:		August 2024
++Contact:	Sergey Senozhatsky <senozhatsky@chromium.org>
++Description:
++		The algorithm_params file is write-only and is used to setup
++		compression algorithm parameters.  The following parameters
++		are supported:
++
++		level=<int>
++			Compression level.  Meaning depends on the algorithm
++			(zstd compression level, deflate compression level,
++			lz4 acceleration, lz4hc compression level).
++
++		dict=<path>
++			Path to the compression dictionary.  Supported by the
++			lz4, lz4hc and zstd backends.
++
++		deflate.winbits=<int>
++			Window bits for the deflate backend.
++
++		Parameters can only be changed before the device is
++		initialized (disksize is set).
+diff --git a/arch/arm64/configs/gki_defconfig b/arch/arm64/configs/gki_defconfig
+index 1760d5a3172b..8c7e6ba0de8a 100644
+--- a/arch/arm64/configs/gki_defconfig
++++ b/arch/arm64/configs/gki_defconfig
+@@ -325,7 +325,14 @@ CONFIG_ARM_SCPI_PROTOCOL=y
+ # CONFIG_ARM_SCPI_POWER_DOMAIN is not set
+ # CONFIG_EFI_ARMSTUB_DTB_LOADER is not set
+ CONFIG_GNSS=y
+-CONFIG_ZRAM=m
++CONFIG_ZRAM=y
++CONFIG_ZRAM_BACKEND_LZO=y
++CONFIG_ZRAM_BACKEND_LZ4=y
++CONFIG_ZRAM_BACKEND_LZ4HC=y
++CONFIG_ZRAM_BACKEND_ZSTD=y
++CONFIG_ZRAM_BACKEND_DEFLATE=y
++CONFIG_ZRAM_BACKEND_842=y
++CONFIG_ZRAM_DEF_COMP_LZORLE=y
+ CONFIG_BLK_DEV_LOOP=y
+ CONFIG_BLK_DEV_LOOP_MIN_COUNT=16
+ CONFIG_BLK_DEV_RAM=y
+diff --git a/drivers/block/zram/Kconfig b/drivers/block/zram/Kconfig
+index d4100b0c083e..d3f520b974c2 100644
+--- a/drivers/block/zram/Kconfig
++++ b/drivers/block/zram/Kconfig
+@@ -2,7 +2,6 @@
+ config ZRAM
+ 	tristate "Compressed RAM block device support"
+ 	depends on BLOCK && SYSFS && MMU
+-	depends on CRYPTO_LZO || CRYPTO_ZSTD || CRYPTO_LZ4 || CRYPTO_LZ4HC || CRYPTO_842
+ 	select ZSMALLOC
+ 	help
+ 	  Creates virtual block devices called /dev/zramX (X = 0, 1, ...).
+@@ -15,6 +14,49 @@ config ZRAM
+ 
+ 	  See Documentation/admin-guide/blockdev/zram.rst for more information.
+ 
++config ZRAM_BACKEND_LZ4
++	bool "lz4 compression support"
++	depends on ZRAM
++	select LZ4_COMPRESS
++	select LZ4_DECOMPRESS
++
++config ZRAM_BACKEND_LZ4HC
++	bool "lz4hc compression support"
++	depends on ZRAM
++	select LZ4HC_COMPRESS
++	select LZ4_DECOMPRESS
++
++config ZRAM_BACKEND_ZSTD
++	bool "zstd compression support"
++	depends on ZRAM
++	select ZSTD_COMPRESS
++	select ZSTD_DECOMPRESS
++
++config ZRAM_BACKEND_DEFLATE
++	bool "deflate compression support"
++	depends on ZRAM
++	select ZLIB_DEFLATE
++	select ZLIB_INFLATE
++
++config ZRAM_BACKEND_842
++	bool "842 compression support"
++	depends on ZRAM
++	select 842_COMPRESS
++	select 842_DECOMPRESS
++
++config ZRAM_BACKEND_FORCE_LZO
++	depends on ZRAM
++	def_bool !ZRAM_BACKEND_LZ4 && !ZRAM_BACKEND_LZ4HC && \
++		!ZRAM_BACKEND_ZSTD && !ZRAM_BACKEND_DEFLATE && \
++		!ZRAM_BACKEND_842
++
++config ZRAM_BACKEND_LZO
++	bool "lzo and lzo-rle compression support" if !ZRAM_BACKEND_FORCE_LZO
++	depends on ZRAM
++	default ZRAM_BACKEND_FORCE_LZO
++	select LZO_COMPRESS
++	select LZO_DECOMPRESS
++
+ choice
+ 	prompt "Default zram compressor"
+ 	default ZRAM_DEF_COMP_LZORLE
+@@ -22,38 +64,45 @@ choice
+ 
+ config ZRAM_DEF_COMP_LZORLE
+ 	bool "lzo-rle"
+-	depends on CRYPTO_LZO
++	depends on ZRAM_BACKEND_LZO
+ 
+-config ZRAM_DEF_COMP_ZSTD
+-	bool "zstd"
+-	depends on CRYPTO_ZSTD
++config ZRAM_DEF_COMP_LZO
++	bool "lzo"
++	depends on ZRAM_BACKEND_LZO
+ 
+ config ZRAM_DEF_COMP_LZ4
+ 	bool "lz4"
+-	depends on CRYPTO_LZ4
+-
+-config ZRAM_DEF_COMP_LZO
+-	bool "lzo"
+-	depends on CRYPTO_LZO
++	depends on ZRAM_BACKEND_LZ4
+ 
+ config ZRAM_DEF_COMP_LZ4HC
+ 	bool "lz4hc"
+-	depends on CRYPTO_LZ4HC
++	depends on ZRAM_BACKEND_LZ4HC
++
++config ZRAM_DEF_COMP_ZSTD
++	bool "zstd"
++	depends on ZRAM_BACKEND_ZSTD
++
++config ZRAM_DEF_COMP_DEFLATE
++	bool "deflate"
++	depends on ZRAM_BACKEND_DEFLATE
+ 
+ config ZRAM_DEF_COMP_842
+ 	bool "842"
+-	depends on CRYPTO_842
++	depends on ZRAM_BACKEND_842
+ 
+ endchoice
+ 
+ config ZRAM_DEF_COMP
+ 	string
++	depends on ZRAM
+ 	default "lzo-rle" if ZRAM_DEF_COMP_LZORLE
+-	default "zstd" if ZRAM_DEF_COMP_ZSTD
+-	default "lz4" if ZRAM_DEF_COMP_LZ4
+ 	default "lzo" if ZRAM_DEF_COMP_LZO
++	default "lz4" if ZRAM_DEF_COMP_LZ4
+ 	default "lz4hc" if ZRAM_DEF_COMP_LZ4HC
++	default "zstd" if ZRAM_DEF_COMP_ZSTD
++	default "deflate" if ZRAM_DEF_COMP_DEFLATE
+ 	default "842" if ZRAM_DEF_COMP_842
++	default "unset-value"
+ 
+ config ZRAM_WRITEBACK
+        bool "Write back incompressible or idle page to backing device"
+diff --git a/drivers/block/zram/Makefile b/drivers/block/zram/Makefile
+index de9e457907b1..0fdefd576691 100644
+--- a/drivers/block/zram/Makefile
++++ b/drivers/block/zram/Makefile
+@@ -1,4 +1,12 @@
+ # SPDX-License-Identifier: GPL-2.0-only
++
+ zram-y	:=	zcomp.o zram_drv.o
+ 
++zram-$(CONFIG_ZRAM_BACKEND_LZO)		+= backend_lzorle.o backend_lzo.o
++zram-$(CONFIG_ZRAM_BACKEND_LZ4)		+= backend_lz4.o
++zram-$(CONFIG_ZRAM_BACKEND_LZ4HC)	+= backend_lz4hc.o
++zram-$(CONFIG_ZRAM_BACKEND_ZSTD)	+= backend_zstd.o
++zram-$(CONFIG_ZRAM_BACKEND_DEFLATE)	+= backend_deflate.o
++zram-$(CONFIG_ZRAM_BACKEND_842)		+= backend_842.o
++
+ obj-$(CONFIG_ZRAM)	+=	zram.o
+diff --git a/drivers/block/zram/backend_842.c b/drivers/block/zram/backend_842.c
+new file mode 100644
+index 000000000000..10d9d5c60f53
+--- /dev/null
++++ b/drivers/block/zram/backend_842.c
+@@ -0,0 +1,61 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#include <linux/kernel.h>
++#include <linux/slab.h>
++#include <linux/sw842.h>
++#include <linux/vmalloc.h>
++
++#include "backend_842.h"
++
++static void release_params_842(struct zcomp_params *params)
++{
++}
++
++static int setup_params_842(struct zcomp_params *params)
++{
++	return 0;
++}
++
++static void destroy_842(struct zcomp_ctx *ctx)
++{
++	kfree(ctx->context);
++}
++
++static int create_842(struct zcomp_params *params, struct zcomp_ctx *ctx)
++{
++	ctx->context = kmalloc(SW842_MEM_COMPRESS, GFP_KERNEL);
++	if (!ctx->context)
++		return -ENOMEM;
++	return 0;
++}
++
++static int compress_842(struct zcomp_params *params, struct zcomp_ctx *ctx,
++			struct zcomp_req *req)
++{
++	unsigned int dlen = req->dst_len;
++	int ret;
++
++	ret = sw842_compress(req->src, req->src_len, req->dst, &dlen,
++			     ctx->context);
++	if (ret == 0)
++		req->dst_len = dlen;
++	return ret;
++}
++
++static int decompress_842(struct zcomp_params *params, struct zcomp_ctx *ctx,
++			  struct zcomp_req *req)
++{
++	unsigned int dlen = req->dst_len;
++
++	return sw842_decompress(req->src, req->src_len, req->dst, &dlen);
++}
++
++const struct zcomp_ops backend_842 = {
++	.compress	= compress_842,
++	.decompress	= decompress_842,
++	.create_ctx	= create_842,
++	.destroy_ctx	= destroy_842,
++	.setup_params	= setup_params_842,
++	.release_params	= release_params_842,
++	.name		= "842",
++};
+diff --git a/drivers/block/zram/backend_842.h b/drivers/block/zram/backend_842.h
+new file mode 100644
+index 000000000000..4dc85c188799
+--- /dev/null
++++ b/drivers/block/zram/backend_842.h
+@@ -0,0 +1,10 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#ifndef __BACKEND_842_H__
++#define __BACKEND_842_H__
++
++#include "zcomp.h"
++
++extern const struct zcomp_ops backend_842;
++
++#endif /* __BACKEND_842_H__ */
+diff --git a/drivers/block/zram/backend_deflate.c b/drivers/block/zram/backend_deflate.c
+new file mode 100644
+index 000000000000..b75016e0e654
+--- /dev/null
++++ b/drivers/block/zram/backend_deflate.c
+@@ -0,0 +1,148 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#include <linux/kernel.h>
++#include <linux/slab.h>
++#include <linux/vmalloc.h>
++#include <linux/zlib.h>
++
++#include "backend_deflate.h"
++
++/* Use the same value as crypto API */
++#define DEFLATE_DEF_WINBITS		(-11)
++#define DEFLATE_DEF_MEMLEVEL		MAX_MEM_LEVEL
++
++struct deflate_ctx {
++	struct z_stream_s cctx;
++	struct z_stream_s dctx;
++};
++
++static void deflate_release_params(struct zcomp_params *params)
++{
++}
++
++static int deflate_setup_params(struct zcomp_params *params)
++{
++	if (params->level == ZCOMP_PARAM_NOT_SET)
++		params->level = Z_DEFAULT_COMPRESSION;
++	if (params->deflate.winbits == ZCOMP_PARAM_NOT_SET)
++		params->deflate.winbits = DEFLATE_DEF_WINBITS;
++
++	return 0;
++}
++
++static void deflate_destroy(struct zcomp_ctx *ctx)
++{
++	struct deflate_ctx *zctx = ctx->context;
++
++	if (!zctx)
++		return;
++
++	if (zctx->cctx.workspace) {
++		zlib_deflateEnd(&zctx->cctx);
++		vfree(zctx->cctx.workspace);
++	}
++	if (zctx->dctx.workspace) {
++		zlib_inflateEnd(&zctx->dctx);
++		vfree(zctx->dctx.workspace);
++	}
++	kfree(zctx);
++}
++
++static int deflate_create(struct zcomp_params *params, struct zcomp_ctx *ctx)
++{
++	struct deflate_ctx *zctx;
++	size_t sz;
++	int ret;
++
++	zctx = kzalloc(sizeof(*zctx), GFP_KERNEL);
++	if (!zctx)
++		return -ENOMEM;
++
++	ctx->context = zctx;
++	sz = zlib_deflate_workspacesize(params->deflate.winbits, MAX_MEM_LEVEL);
++	zctx->cctx.workspace = vzalloc(sz);
++	if (!zctx->cctx.workspace)
++		goto error;
++
++	ret = zlib_deflateInit2(&zctx->cctx, params->level, Z_DEFLATED,
++				params->deflate.winbits, DEFLATE_DEF_MEMLEVEL,
++				Z_DEFAULT_STRATEGY);
++	if (ret != Z_OK)
++		goto error;
++
++	sz = zlib_inflate_workspacesize();
++	zctx->dctx.workspace = vzalloc(sz);
++	if (!zctx->dctx.workspace)
++		goto error;
++
++	ret = zlib_inflateInit2(&zctx->dctx, params->deflate.winbits);
++	if (ret != Z_OK)
++		goto error;
++
++	return 0;
++
++error:
++	deflate_destroy(ctx);
++	return -EINVAL;
++}
++
++static int deflate_compress(struct zcomp_params *params, struct zcomp_ctx *ctx,
++			    struct zcomp_req *req)
++{
++	struct deflate_ctx *zctx = ctx->context;
++	struct z_stream_s *deflate;
++	int ret;
++
++	deflate = &zctx->cctx;
++	ret = zlib_deflateReset(deflate);
++	if (ret != Z_OK)
++		return -EINVAL;
++
++	deflate->next_in = (u8 *)req->src;
++	deflate->avail_in = req->src_len;
++	deflate->next_out = (u8 *)req->dst;
++	deflate->avail_out = req->dst_len;
++
++	ret = zlib_deflate(deflate, Z_FINISH);
++	if (ret != Z_STREAM_END)
++		return -EINVAL;
++
++	req->dst_len = deflate->total_out;
++	return 0;
++}
++
++static int deflate_decompress(struct zcomp_params *params,
++			      struct zcomp_ctx *ctx,
++			      struct zcomp_req *req)
++{
++	struct deflate_ctx *zctx = ctx->context;
++	struct z_stream_s *inflate;
++	int ret;
++
++	inflate = &zctx->dctx;
++
++	ret = zlib_inflateReset(inflate);
++	if (ret != Z_OK)
++		return -EINVAL;
++
++	inflate->next_in = (u8 *)req->src;
++	inflate->avail_in = req->src_len;
++	inflate->next_out = (u8 *)req->dst;
++	inflate->avail_out = req->dst_len;
++
++	ret = zlib_inflate(inflate, Z_SYNC_FLUSH);
++	if (ret != Z_STREAM_END)
++		return -EINVAL;
++
++	return 0;
++}
++
++const struct zcomp_ops backend_deflate = {
++	.compress	= deflate_compress,
++	.decompress	= deflate_decompress,
++	.create_ctx	= deflate_create,
++	.destroy_ctx	= deflate_destroy,
++	.setup_params	= deflate_setup_params,
++	.release_params	= deflate_release_params,
++	.name		= "deflate",
++};
+diff --git a/drivers/block/zram/backend_deflate.h b/drivers/block/zram/backend_deflate.h
+new file mode 100644
+index 000000000000..a39ac12b114c
+--- /dev/null
++++ b/drivers/block/zram/backend_deflate.h
+@@ -0,0 +1,10 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#ifndef __BACKEND_DEFLATE_H__
++#define __BACKEND_DEFLATE_H__
++
++#include "zcomp.h"
++
++extern const struct zcomp_ops backend_deflate;
++
++#endif /* __BACKEND_DEFLATE_H__ */
+diff --git a/drivers/block/zram/backend_lz4.c b/drivers/block/zram/backend_lz4.c
+new file mode 100644
+index 000000000000..c5f61fceaf53
+--- /dev/null
++++ b/drivers/block/zram/backend_lz4.c
+@@ -0,0 +1,150 @@
++#include <linux/kernel.h>
++#include <linux/lz4.h>
++#include <linux/slab.h>
++#include <linux/vmalloc.h>
++
++#include "backend_lz4.h"
++
++struct lz4_ctx {
++	void *mem;
++
++	LZ4_streamDecode_t *dstrm;
++	LZ4_stream_t *cstrm;
++};
++
++static void lz4_release_params(struct zcomp_params *params)
++{
++	LZ4_stream_t *dict_stream = params->drv_data;
++
++	params->drv_data = NULL;
++	if (!dict_stream)
++		return;
++
++	kfree(dict_stream);
++}
++
++static int lz4_setup_params(struct zcomp_params *params)
++{
++	LZ4_stream_t *dict_stream;
++	int ret;
++
++	if (params->level == ZCOMP_PARAM_NOT_SET)
++		params->level = LZ4_ACCELERATION_DEFAULT;
++
++	if (!params->dict || !params->dict_sz)
++		return 0;
++
++	dict_stream = kzalloc(sizeof(*dict_stream), GFP_KERNEL);
++	if (!dict_stream)
++		return -ENOMEM;
++
++	ret = LZ4_loadDict(dict_stream,
++			   params->dict, params->dict_sz);
++	if (ret != params->dict_sz) {
++		kfree(dict_stream);
++		return -EINVAL;
++	}
++	params->drv_data = dict_stream;
++
++	return 0;
++}
++
++static void lz4_destroy(struct zcomp_ctx *ctx)
++{
++	struct lz4_ctx *zctx = ctx->context;
++
++	if (!zctx)
++		return;
++
++	vfree(zctx->mem);
++	kfree(zctx->dstrm);
++	kfree(zctx->cstrm);
++	kfree(zctx);
++}
++
++static int lz4_create(struct zcomp_params *params, struct zcomp_ctx *ctx)
++{
++	struct lz4_ctx *zctx;
++
++	zctx = kzalloc(sizeof(*zctx), GFP_KERNEL);
++	if (!zctx)
++		return -ENOMEM;
++
++	ctx->context = zctx;
++	if (params->dict_sz == 0) {
++		zctx->mem = vmalloc(LZ4_MEM_COMPRESS);
++		if (!zctx->mem)
++			goto error;
++	} else {
++		zctx->dstrm = kzalloc(sizeof(*zctx->dstrm), GFP_KERNEL);
++		if (!zctx->dstrm)
++			goto error;
++
++		zctx->cstrm = kzalloc(sizeof(*zctx->cstrm), GFP_KERNEL);
++		if (!zctx->cstrm)
++			goto error;
++	}
++
++	return 0;
++
++error:
++	lz4_destroy(ctx);
++	return -ENOMEM;
++}
++
++static int lz4_compress(struct zcomp_params *params, struct zcomp_ctx *ctx,
++			struct zcomp_req *req)
++{
++	struct lz4_ctx *zctx = ctx->context;
++	int ret;
++
++	if (!zctx->cstrm) {
++		ret = LZ4_compress_fast(req->src, req->dst, req->src_len,
++					req->dst_len, params->level,
++					zctx->mem);
++	} else {
++		/* Cstrm needs to be reset */
++		memcpy(zctx->cstrm, params->drv_data, sizeof(*zctx->cstrm));
++		ret = LZ4_compress_fast_continue(zctx->cstrm, req->src,
++						 req->dst, req->src_len,
++						 req->dst_len, params->level);
++	}
++	if (!ret)
++		return -EINVAL;
++	req->dst_len = ret;
++	return 0;
++}
++
++static int lz4_decompress(struct zcomp_params *params, struct zcomp_ctx *ctx,
++			  struct zcomp_req *req)
++{
++	struct lz4_ctx *zctx = ctx->context;
++	int ret;
++
++	if (!zctx->dstrm) {
++		ret = LZ4_decompress_safe(req->src, req->dst, req->src_len,
++					  req->dst_len);
++	} else {
++		/* Dstrm needs to be reset */
++		ret = LZ4_setStreamDecode(zctx->dstrm, params->dict,
++					  params->dict_sz);
++		if (!ret)
++			return -EINVAL;
++		ret = LZ4_decompress_safe_continue(zctx->dstrm, req->src,
++						   req->dst, req->src_len,
++						   req->dst_len);
++	}
++	if (ret < 0)
++		return -EINVAL;
++	return 0;
++}
++
++const struct zcomp_ops backend_lz4 = {
++	.compress	= lz4_compress,
++	.decompress	= lz4_decompress,
++	.create_ctx	= lz4_create,
++	.destroy_ctx	= lz4_destroy,
++	.setup_params	= lz4_setup_params,
++	.release_params	= lz4_release_params,
++	.name		= "lz4",
++};
+diff --git a/drivers/block/zram/backend_lz4.h b/drivers/block/zram/backend_lz4.h
+new file mode 100644
+index 000000000000..c11fa602a703
+--- /dev/null
++++ b/drivers/block/zram/backend_lz4.h
+@@ -0,0 +1,10 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#ifndef __BACKEND_LZ4_H__
++#define __BACKEND_LZ4_H__
++
++#include "zcomp.h"
++
++extern const struct zcomp_ops backend_lz4;
++
++#endif /* __BACKEND_LZ4_H__ */
+diff --git a/drivers/block/zram/backend_lz4hc.c b/drivers/block/zram/backend_lz4hc.c
+new file mode 100644
+index 000000000000..9e8a35dfa56d
+--- /dev/null
++++ b/drivers/block/zram/backend_lz4hc.c
+@@ -0,0 +1,128 @@
++#include <linux/kernel.h>
++#include <linux/lz4.h>
++#include <linux/slab.h>
++#include <linux/vmalloc.h>
++
++#include "backend_lz4hc.h"
++
++struct lz4hc_ctx {
++	void *mem;
++
++	LZ4_streamDecode_t *dstrm;
++	LZ4_streamHC_t *cstrm;
++};
++
++static void lz4hc_release_params(struct zcomp_params *params)
++{
++}
++
++static int lz4hc_setup_params(struct zcomp_params *params)
++{
++	if (params->level == ZCOMP_PARAM_NOT_SET)
++		params->level = LZ4HC_DEFAULT_CLEVEL;
++
++	return 0;
++}
++
++static void lz4hc_destroy(struct zcomp_ctx *ctx)
++{
++	struct lz4hc_ctx *zctx = ctx->context;
++
++	if (!zctx)
++		return;
++
++	kfree(zctx->dstrm);
++	kfree(zctx->cstrm);
++	vfree(zctx->mem);
++	kfree(zctx);
++}
++
++static int lz4hc_create(struct zcomp_params *params, struct zcomp_ctx *ctx)
++{
++	struct lz4hc_ctx *zctx;
++
++	zctx = kzalloc(sizeof(*zctx), GFP_KERNEL);
++	if (!zctx)
++		return -ENOMEM;
++
++	ctx->context = zctx;
++	if (params->dict_sz == 0) {
++		zctx->mem = vmalloc(LZ4HC_MEM_COMPRESS);
++		if (!zctx->mem)
++			goto error;
++	} else {
++		zctx->dstrm = kzalloc(sizeof(*zctx->dstrm), GFP_KERNEL);
++		if (!zctx->dstrm)
++			goto error;
++
++		zctx->cstrm = kzalloc(sizeof(*zctx->cstrm), GFP_KERNEL);
++		if (!zctx->cstrm)
++			goto error;
++	}
++
++	return 0;
++
++error:
++	lz4hc_destroy(ctx);
++	return -EINVAL;
++}
++
++static int lz4hc_compress(struct zcomp_params *params, struct zcomp_ctx *ctx,
++			  struct zcomp_req *req)
++{
++	struct lz4hc_ctx *zctx = ctx->context;
++	int ret;
++
++	if (!zctx->cstrm) {
++		ret = LZ4_compress_HC(req->src, req->dst, req->src_len,
++				      req->dst_len, params->level,
++				      zctx->mem);
++	} else {
++		/* Cstrm needs to be reset */
++		LZ4_resetStreamHC(zctx->cstrm, params->level);
++		ret = LZ4_loadDictHC(zctx->cstrm, params->dict,
++				     params->dict_sz);
++		if (ret != params->dict_sz)
++			return -EINVAL;
++		ret = LZ4_compress_HC_continue(zctx->cstrm, req->src, req->dst,
++					       req->src_len, req->dst_len);
++	}
++	if (!ret)
++		return -EINVAL;
++	req->dst_len = ret;
++	return 0;
++}
++
++static int lz4hc_decompress(struct zcomp_params *params, struct zcomp_ctx *ctx,
++			    struct zcomp_req *req)
++{
++	struct lz4hc_ctx *zctx = ctx->context;
++	int ret;
++
++	if (!zctx->dstrm) {
++		ret = LZ4_decompress_safe(req->src, req->dst, req->src_len,
++					  req->dst_len);
++	} else {
++		/* Dstrm needs to be reset */
++		ret = LZ4_setStreamDecode(zctx->dstrm, params->dict,
++					  params->dict_sz);
++		if (!ret)
++			return -EINVAL;
++		ret = LZ4_decompress_safe_continue(zctx->dstrm, req->src,
++						   req->dst, req->src_len,
++						   req->dst_len);
++	}
++	if (ret < 0)
++		return -EINVAL;
++	return 0;
++}
++
++const struct zcomp_ops backend_lz4hc = {
++	.compress	= lz4hc_compress,
++	.decompress	= lz4hc_decompress,
++	.create_ctx	= lz4hc_create,
++	.destroy_ctx	= lz4hc_destroy,
++	.setup_params	= lz4hc_setup_params,
++	.release_params	= lz4hc_release_params,
++	.name		= "lz4hc",
++};
+diff --git a/drivers/block/zram/backend_lz4hc.h b/drivers/block/zram/backend_lz4hc.h
+new file mode 100644
+index 000000000000..6de03551ed4d
+--- /dev/null
++++ b/drivers/block/zram/backend_lz4hc.h
+@@ -0,0 +1,10 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#ifndef __BACKEND_LZ4HC_H__
++#define __BACKEND_LZ4HC_H__
++
++#include "zcomp.h"
++
++extern const struct zcomp_ops backend_lz4hc;
++
++#endif /* __BACKEND_LZ4HC_H__ */
+diff --git a/drivers/block/zram/backend_lzo.c b/drivers/block/zram/backend_lzo.c
+new file mode 100644
+index 000000000000..4c906beaae6b
+--- /dev/null
++++ b/drivers/block/zram/backend_lzo.c
+@@ -0,0 +1,59 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#include <linux/kernel.h>
++#include <linux/slab.h>
++#include <linux/lzo.h>
++
++#include "backend_lzo.h"
++
++static void lzo_release_params(struct zcomp_params *params)
++{
++}
++
++static int lzo_setup_params(struct zcomp_params *params)
++{
++	return 0;
++}
++
++static int lzo_create(struct zcomp_params *params, struct zcomp_ctx *ctx)
++{
++	ctx->context = kzalloc(LZO1X_MEM_COMPRESS, GFP_KERNEL);
++	if (!ctx->context)
++		return -ENOMEM;
++	return 0;
++}
++
++static void lzo_destroy(struct zcomp_ctx *ctx)
++{
++	kfree(ctx->context);
++}
++
++static int lzo_compress(struct zcomp_params *params, struct zcomp_ctx *ctx,
++			struct zcomp_req *req)
++{
++	int ret;
++
++	ret = lzo1x_1_compress(req->src, req->src_len, req->dst,
++			       &req->dst_len, ctx->context);
++	return ret == LZO_E_OK ? 0 : ret;
++}
++
++static int lzo_decompress(struct zcomp_params *params, struct zcomp_ctx *ctx,
++			  struct zcomp_req *req)
++{
++	int ret;
++
++	ret = lzo1x_decompress_safe(req->src, req->src_len,
++				    req->dst, &req->dst_len);
++	return ret == LZO_E_OK ? 0 : ret;
++}
++
++const struct zcomp_ops backend_lzo = {
++	.compress	= lzo_compress,
++	.decompress	= lzo_decompress,
++	.create_ctx	= lzo_create,
++	.destroy_ctx	= lzo_destroy,
++	.setup_params	= lzo_setup_params,
++	.release_params	= lzo_release_params,
++	.name		= "lzo",
++};
+diff --git a/drivers/block/zram/backend_lzo.h b/drivers/block/zram/backend_lzo.h
+new file mode 100644
+index 000000000000..93d54749e63c
+--- /dev/null
++++ b/drivers/block/zram/backend_lzo.h
+@@ -0,0 +1,10 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#ifndef __BACKEND_LZO_H__
++#define __BACKEND_LZO_H__
++
++#include "zcomp.h"
++
++extern const struct zcomp_ops backend_lzo;
++
++#endif /* __BACKEND_LZO_H__ */
+diff --git a/drivers/block/zram/backend_lzorle.c b/drivers/block/zram/backend_lzorle.c
+new file mode 100644
+index 000000000000..10640c96cbfc
+--- /dev/null
++++ b/drivers/block/zram/backend_lzorle.c
+@@ -0,0 +1,59 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#include <linux/kernel.h>
++#include <linux/slab.h>
++#include <linux/lzo.h>
++
++#include "backend_lzorle.h"
++
++static void lzorle_release_params(struct zcomp_params *params)
++{
++}
++
++static int lzorle_setup_params(struct zcomp_params *params)
++{
++	return 0;
++}
++
++static int lzorle_create(struct zcomp_params *params, struct zcomp_ctx *ctx)
++{
++	ctx->context = kzalloc(LZO1X_MEM_COMPRESS, GFP_KERNEL);
++	if (!ctx->context)
++		return -ENOMEM;
++	return 0;
++}
++
++static void lzorle_destroy(struct zcomp_ctx *ctx)
++{
++	kfree(ctx->context);
++}
++
++static int lzorle_compress(struct zcomp_params *params, struct zcomp_ctx *ctx,
++			   struct zcomp_req *req)
++{
++	int ret;
++
++	ret = lzorle1x_1_compress(req->src, req->src_len, req->dst,
++				  &req->dst_len, ctx->context);
++	return ret == LZO_E_OK ? 0 : ret;
++}
++
++static int lzorle_decompress(struct zcomp_params *params, struct zcomp_ctx *ctx,
++			     struct zcomp_req *req)
++{
++	int ret;
++
++	ret = lzo1x_decompress_safe(req->src, req->src_len,
++				    req->dst, &req->dst_len);
++	return ret == LZO_E_OK ? 0 : ret;
++}
++
++const struct zcomp_ops backend_lzorle = {
++	.compress	= lzorle_compress,
++	.decompress	= lzorle_decompress,
++	.create_ctx	= lzorle_create,
++	.destroy_ctx	= lzorle_destroy,
++	.setup_params	= lzorle_setup_params,
++	.release_params	= lzorle_release_params,
++	.name		= "lzo-rle",
++};
+diff --git a/drivers/block/zram/backend_lzorle.h b/drivers/block/zram/backend_lzorle.h
+new file mode 100644
+index 000000000000..6ecb163b09f1
+--- /dev/null
++++ b/drivers/block/zram/backend_lzorle.h
+@@ -0,0 +1,10 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#ifndef __BACKEND_LZORLE_H__
++#define __BACKEND_LZORLE_H__
++
++#include "zcomp.h"
++
++extern const struct zcomp_ops backend_lzorle;
++
++#endif /* __BACKEND_LZORLE_H__ */
+diff --git a/drivers/block/zram/backend_zstd.c b/drivers/block/zram/backend_zstd.c
+new file mode 100644
+index 000000000000..81defb98ed09
+--- /dev/null
++++ b/drivers/block/zram/backend_zstd.c
+@@ -0,0 +1,217 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#include <linux/kernel.h>
++#include <linux/slab.h>
++#include <linux/vmalloc.h>
++#include <linux/zstd.h>
++
++#include "backend_zstd.h"
++
++struct zstd_ctx {
++	zstd_cctx *cctx;
++	zstd_dctx *dctx;
++	void *cctx_mem;
++	void *dctx_mem;
++};
++
++struct zstd_params {
++	zstd_custom_mem custom_mem;
++	zstd_cdict *cdict;
++	zstd_ddict *ddict;
++	zstd_parameters cprm;
++};
++
++/*
++ * For C/D dictionaries we need to provide zstd with zstd_custom_mem,
++ * which zstd uses internally to allocate/free memory when needed.
++ */
++static void *zstd_custom_alloc(void *opaque, size_t size)
++{
++	return kvzalloc(size, GFP_NOIO | __GFP_NOWARN);
++}
++
++static void zstd_custom_free(void *opaque, void *address)
++{
++	kvfree(address);
++}
++
++static void zstd_release_params(struct zcomp_params *params)
++{
++	struct zstd_params *zp = params->drv_data;
++
++	params->drv_data = NULL;
++	if (!zp)
++		return;
++
++	zstd_free_cdict(zp->cdict);
++	zstd_free_ddict(zp->ddict);
++	kfree(zp);
++}
++
++static int zstd_setup_params(struct zcomp_params *params)
++{
++	zstd_compression_parameters prm;
++	struct zstd_params *zp;
++
++	zp = kzalloc(sizeof(*zp), GFP_KERNEL);
++	if (!zp)
++		return -ENOMEM;
++
++	params->drv_data = zp;
++	if (params->level == ZCOMP_PARAM_NOT_SET)
++		params->level = zstd_default_clevel();
++
++	zp->cprm = zstd_get_params(params->level, PAGE_SIZE);
++
++	zp->custom_mem.customAlloc = zstd_custom_alloc;
++	zp->custom_mem.customFree = zstd_custom_free;
++
++	prm = zstd_get_cparams(params->level, PAGE_SIZE,
++			       params->dict_sz);
++
++	zp->cdict = zstd_create_cdict_byreference(params->dict,
++						  params->dict_sz,
++						  prm,
++						  zp->custom_mem);
++	if (!zp->cdict)
++		goto error;
++
++	zp->ddict = zstd_create_ddict_byreference(params->dict,
++						  params->dict_sz,
++						  zp->custom_mem);
++	if (!zp->ddict)
++		goto error;
++
++	return 0;
++
++error:
++	zstd_release_params(params);
++	return -EINVAL;
++}
++
++static void zstd_destroy(struct zcomp_ctx *ctx)
++{
++	struct zstd_ctx *zctx = ctx->context;
++
++	if (!zctx)
++		return;
++
++	/*
++	 * If ->cctx_mem and ->dctx_mem were allocated then we didn't use
++	 * C/D dictionary and ->cctx / ->dctx were "embedded" into these
++	 * buffers.
++	 *
++	 * If otherwise then we need to explicitly release ->cctx / ->dctx.
++	 */
++	if (zctx->cctx_mem)
++		vfree(zctx->cctx_mem);
++	else
++		zstd_free_cctx(zctx->cctx);
++
++	if (zctx->dctx_mem)
++		vfree(zctx->dctx_mem);
++	else
++		zstd_free_dctx(zctx->dctx);
++
++	kfree(zctx);
++}
++
++static int zstd_create(struct zcomp_params *params, struct zcomp_ctx *ctx)
++{
++	struct zstd_ctx *zctx;
++	zstd_parameters prm;
++	size_t sz;
++
++	zctx = kzalloc(sizeof(*zctx), GFP_KERNEL);
++	if (!zctx)
++		return -ENOMEM;
++
++	ctx->context = zctx;
++	if (params->dict_sz == 0) {
++		prm = zstd_get_params(params->level, PAGE_SIZE);
++		sz = zstd_cctx_workspace_bound(&prm.cParams);
++		zctx->cctx_mem = vzalloc(sz);
++		if (!zctx->cctx_mem)
++			goto error;
++
++		zctx->cctx = zstd_init_cctx(zctx->cctx_mem, sz);
++		if (!zctx->cctx)
++			goto error;
++
++		sz = zstd_dctx_workspace_bound();
++		zctx->dctx_mem = vzalloc(sz);
++		if (!zctx->dctx_mem)
++			goto error;
++
++		zctx->dctx = zstd_init_dctx(zctx->dctx_mem, sz);
++		if (!zctx->dctx)
++			goto error;
++	} else {
++		struct zstd_params *zp = params->drv_data;
++
++		zctx->cctx = zstd_create_cctx_advanced(zp->custom_mem);
++		if (!zctx->cctx)
++			goto error;
++
++		zctx->dctx = zstd_create_dctx_advanced(zp->custom_mem);
++		if (!zctx->dctx)
++			goto error;
++	}
++
++	return 0;
++
++error:
++	zstd_release_params(params);
++	zstd_destroy(ctx);
++	return -EINVAL;
++}
++
++static int zstd_compress(struct zcomp_params *params, struct zcomp_ctx *ctx,
++			 struct zcomp_req *req)
++{
++	struct zstd_params *zp = params->drv_data;
++	struct zstd_ctx *zctx = ctx->context;
++	size_t ret;
++
++	if (params->dict_sz == 0)
++		ret = zstd_compress_cctx(zctx->cctx, req->dst, req->dst_len,
++					 req->src, req->src_len, &zp->cprm);
++	else
++		ret = zstd_compress_using_cdict(zctx->cctx, req->dst,
++						req->dst_len, req->src,
++						req->src_len,
++						zp->cdict);
++	if (zstd_is_error(ret))
++		return -EINVAL;
++	req->dst_len = ret;
++	return 0;
++}
++
++static int zstd_decompress(struct zcomp_params *params, struct zcomp_ctx *ctx,
++			   struct zcomp_req *req)
++{
++	struct zstd_params *zp = params->drv_data;
++	struct zstd_ctx *zctx = ctx->context;
++	size_t ret;
++
++	if (params->dict_sz == 0)
++		ret = zstd_decompress_dctx(zctx->dctx, req->dst, req->dst_len,
++					   req->src, req->src_len);
++	else
++		ret = zstd_decompress_using_ddict(zctx->dctx, req->dst,
++						  req->dst_len, req->src,
++						  req->src_len, zp->ddict);
++	if (zstd_is_error(ret))
++		return -EINVAL;
++	return 0;
++}
++
++const struct zcomp_ops backend_zstd = {
++	.compress	= zstd_compress,
++	.decompress	= zstd_decompress,
++	.create_ctx	= zstd_create,
++	.destroy_ctx	= zstd_destroy,
++	.setup_params	= zstd_setup_params,
++	.release_params	= zstd_release_params,
++	.name		= "zstd",
++};
+diff --git a/drivers/block/zram/backend_zstd.h b/drivers/block/zram/backend_zstd.h
+new file mode 100644
+index 000000000000..10fdfff1ec1c
+--- /dev/null
++++ b/drivers/block/zram/backend_zstd.h
+@@ -0,0 +1,10 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#ifndef __BACKEND_ZSTD_H__
++#define __BACKEND_ZSTD_H__
++
++#include "zcomp.h"
++
++extern const struct zcomp_ops backend_zstd;
++
++#endif /* __BACKEND_ZSTD_H__ */
+diff --git a/drivers/block/zram/zcomp.c b/drivers/block/zram/zcomp.c
+index 0916de952e09..bb514403e305 100644
+--- a/drivers/block/zram/zcomp.c
++++ b/drivers/block/zram/zcomp.c
+@@ -1,7 +1,4 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+-/*
+- * Copyright (C) 2014 Sergey Senozhatsky.
+- */
+ 
+ #include <linux/kernel.h>
+ #include <linux/string.h>
+@@ -11,94 +8,101 @@
+ #include <linux/sched.h>
+ #include <linux/cpu.h>
+ #include <linux/crypto.h>
++#include <linux/vmalloc.h>
+ 
+ #include "zcomp.h"
+ 
+-static const char * const backends[] = {
+-#if IS_ENABLED(CONFIG_CRYPTO_LZO)
+-	"lzo",
+-	"lzo-rle",
++#include "backend_lzo.h"
++#include "backend_lzorle.h"
++#include "backend_lz4.h"
++#include "backend_lz4hc.h"
++#include "backend_zstd.h"
++#include "backend_deflate.h"
++#include "backend_842.h"
++
++static const struct zcomp_ops *backends[] = {
++#if IS_ENABLED(CONFIG_ZRAM_BACKEND_LZO)
++	&backend_lzorle,
++	&backend_lzo,
+ #endif
+-#if IS_ENABLED(CONFIG_CRYPTO_LZ4)
+-	"lz4",
++#if IS_ENABLED(CONFIG_ZRAM_BACKEND_LZ4)
++	&backend_lz4,
+ #endif
+-#if IS_ENABLED(CONFIG_CRYPTO_LZ4HC)
+-	"lz4hc",
++#if IS_ENABLED(CONFIG_ZRAM_BACKEND_LZ4HC)
++	&backend_lz4hc,
+ #endif
+-#if IS_ENABLED(CONFIG_CRYPTO_842)
+-	"842",
++#if IS_ENABLED(CONFIG_ZRAM_BACKEND_ZSTD)
++	&backend_zstd,
+ #endif
+-#if IS_ENABLED(CONFIG_CRYPTO_ZSTD)
+-	"zstd",
++#if IS_ENABLED(CONFIG_ZRAM_BACKEND_DEFLATE)
++	&backend_deflate,
+ #endif
++#if IS_ENABLED(CONFIG_ZRAM_BACKEND_842)
++	&backend_842,
++#endif
++	NULL
+ };
+ 
+-static void zcomp_strm_free(struct zcomp_strm *zstrm)
++static void zcomp_strm_free(struct zcomp *comp, struct zcomp_strm *zstrm)
+ {
+-	if (!IS_ERR_OR_NULL(zstrm->tfm))
+-		crypto_free_comp(zstrm->tfm);
+-	free_pages((unsigned long)zstrm->buffer, 1);
+-	zstrm->tfm = NULL;
++	comp->ops->destroy_ctx(&zstrm->ctx);
++	vfree(zstrm->buffer);
+ 	zstrm->buffer = NULL;
+ }
+ 
+-/*
+- * Initialize zcomp_strm structure with ->tfm initialized by backend, and
+- * ->buffer. Return a negative value on error.
+- */
+-static int zcomp_strm_init(struct zcomp_strm *zstrm, struct zcomp *comp)
++static int zcomp_strm_init(struct zcomp *comp, struct zcomp_strm *zstrm)
+ {
+-	zstrm->tfm = crypto_alloc_comp(comp->name, 0, 0);
++	int ret;
++
++	ret = comp->ops->create_ctx(comp->params, &zstrm->ctx);
++	if (ret)
++		return ret;
++
+ 	/*
+ 	 * allocate 2 pages. 1 for compressed data, plus 1 extra for the
+ 	 * case when compressed size is larger than the original one
+ 	 */
+-	zstrm->buffer = (void *)__get_free_pages(GFP_KERNEL | __GFP_ZERO, 1);
+-	if (IS_ERR_OR_NULL(zstrm->tfm) || !zstrm->buffer) {
+-		zcomp_strm_free(zstrm);
++	zstrm->buffer = vzalloc(2 * PAGE_SIZE);
++	if (!zstrm->buffer) {
++		zcomp_strm_free(comp, zstrm);
+ 		return -ENOMEM;
+ 	}
+ 	return 0;
+ }
+ 
++static const struct zcomp_ops *lookup_backend_ops(const char *comp)
++{
++	int i = 0;
++
++	while (backends[i]) {
++		if (sysfs_streq(comp, backends[i]->name))
++			break;
++		i++;
++	}
++	return backends[i];
++}
++
+ bool zcomp_available_algorithm(const char *comp)
+ {
+-	/*
+-	 * Crypto does not ignore a trailing new line symbol,
+-	 * so make sure you don't supply a string containing
+-	 * one.
+-	 * This also means that we permit zcomp initialisation
+-	 * with any compressing algorithm known to crypto api.
+-	 */
+-	return crypto_has_comp(comp, 0, 0) == 1;
++	return lookup_backend_ops(comp) != NULL;
+ }
+ 
+ /* show available compressors */
+ ssize_t zcomp_available_show(const char *comp, char *buf)
+ {
+-	bool known_algorithm = false;
+ 	ssize_t sz = 0;
+ 	int i;
+ 
+-	for (i = 0; i < ARRAY_SIZE(backends); i++) {
+-		if (!strcmp(comp, backends[i])) {
+-			known_algorithm = true;
++	for (i = 0; i < ARRAY_SIZE(backends) - 1; i++) {
++		if (!strcmp(comp, backends[i]->name)) {
+ 			sz += scnprintf(buf + sz, PAGE_SIZE - sz - 2,
+-					"[%s] ", backends[i]);
++					"[%s] ", backends[i]->name);
+ 		} else {
+ 			sz += scnprintf(buf + sz, PAGE_SIZE - sz - 2,
+-					"%s ", backends[i]);
++					"%s ", backends[i]->name);
+ 		}
+ 	}
+ 
+-	/*
+-	 * Out-of-tree module known to crypto api or a missing
+-	 * entry in `backends'.
+-	 */
+-	if (!known_algorithm && crypto_has_comp(comp, 0, 0) == 1)
+-		sz += scnprintf(buf + sz, PAGE_SIZE - sz - 2,
+-				"[%s] ", comp);
+-
+ 	sz += scnprintf(buf + sz, PAGE_SIZE - sz, "\n");
+ 	return sz;
+ }
+@@ -114,38 +118,34 @@ void zcomp_stream_put(struct zcomp *comp)
+ 	local_unlock(&comp->stream->lock);
+ }
+ 
+-int zcomp_compress(struct zcomp_strm *zstrm,
+-		const void *src, unsigned int *dst_len)
++int zcomp_compress(struct zcomp *comp, struct zcomp_strm *zstrm,
++		   const void *src, unsigned int *dst_len)
+ {
+-	/*
+-	 * Our dst memory (zstrm->buffer) is always `2 * PAGE_SIZE' sized
+-	 * because sometimes we can endup having a bigger compressed data
+-	 * due to various reasons: for example compression algorithms tend
+-	 * to add some padding to the compressed buffer. Speaking of padding,
+-	 * comp algorithm `842' pads the compressed length to multiple of 8
+-	 * and returns -ENOSP when the dst memory is not big enough, which
+-	 * is not something that ZRAM wants to see. We can handle the
+-	 * `compressed_size > PAGE_SIZE' case easily in ZRAM, but when we
+-	 * receive -ERRNO from the compressing backend we can't help it
+-	 * anymore. To make `842' happy we need to tell the exact size of
+-	 * the dst buffer, zram_drv will take care of the fact that
+-	 * compressed buffer is too big.
+-	 */
+-	*dst_len = PAGE_SIZE * 2;
++	struct zcomp_req req = {
++		.src = src,
++		.dst = zstrm->buffer,
++		.src_len = PAGE_SIZE,
++		.dst_len = 2 * PAGE_SIZE,
++	};
++	int ret;
+ 
+-	return crypto_comp_compress(zstrm->tfm,
+-			src, PAGE_SIZE,
+-			zstrm->buffer, dst_len);
++	ret = comp->ops->compress(comp->params, &zstrm->ctx, &req);
++	if (!ret)
++		*dst_len = req.dst_len;
++	return ret;
+ }
+ 
+-int zcomp_decompress(struct zcomp_strm *zstrm,
+-		const void *src, unsigned int src_len, void *dst)
++int zcomp_decompress(struct zcomp *comp, struct zcomp_strm *zstrm,
++		     const void *src, unsigned int src_len, void *dst)
+ {
+-	unsigned int dst_len = PAGE_SIZE;
+-
+-	return crypto_comp_decompress(zstrm->tfm,
+-			src, src_len,
+-			dst, &dst_len);
++	struct zcomp_req req = {
++		.src = src,
++		.dst = dst,
++		.src_len = src_len,
++		.dst_len = PAGE_SIZE,
++	};
++
++	return comp->ops->decompress(comp->params, &zstrm->ctx, &req);
+ }
+ 
+ int zcomp_cpu_up_prepare(unsigned int cpu, struct hlist_node *node)
+@@ -157,7 +157,7 @@ int zcomp_cpu_up_prepare(unsigned int cpu, struct hlist_node *node)
+ 	zstrm = per_cpu_ptr(comp->stream, cpu);
+ 	local_lock_init(&zstrm->lock);
+ 
+-	ret = zcomp_strm_init(zstrm, comp);
++	ret = zcomp_strm_init(comp, zstrm);
+ 	if (ret)
+ 		pr_err("Can't allocate a compression stream\n");
+ 	return ret;
+@@ -169,11 +169,11 @@ int zcomp_cpu_dead(unsigned int cpu, struct hlist_node *node)
+ 	struct zcomp_strm *zstrm;
+ 
+ 	zstrm = per_cpu_ptr(comp->stream, cpu);
+-	zcomp_strm_free(zstrm);
++	zcomp_strm_free(comp, zstrm);
+ 	return 0;
+ }
+ 
+-static int zcomp_init(struct zcomp *comp)
++static int zcomp_init(struct zcomp *comp, struct zcomp_params *params)
+ {
+ 	int ret;
+ 
+@@ -181,12 +181,19 @@ static int zcomp_init(struct zcomp *comp)
+ 	if (!comp->stream)
+ 		return -ENOMEM;
+ 
++	comp->params = params;
++	ret = comp->ops->setup_params(comp->params);
++	if (ret)
++		goto cleanup;
++
+ 	ret = cpuhp_state_add_instance(CPUHP_ZCOMP_PREPARE, &comp->node);
+ 	if (ret < 0)
+ 		goto cleanup;
++
+ 	return 0;
+ 
+ cleanup:
++	comp->ops->release_params(comp->params);
+ 	free_percpu(comp->stream);
+ 	return ret;
+ }
+@@ -194,37 +201,35 @@ static int zcomp_init(struct zcomp *comp)
+ void zcomp_destroy(struct zcomp *comp)
+ {
+ 	cpuhp_state_remove_instance(CPUHP_ZCOMP_PREPARE, &comp->node);
++	comp->ops->release_params(comp->params);
+ 	free_percpu(comp->stream);
+ 	kfree(comp);
+ }
+ 
+-/*
+- * search available compressors for requested algorithm.
+- * allocate new zcomp and initialize it. return compressing
+- * backend pointer or ERR_PTR if things went bad. ERR_PTR(-EINVAL)
+- * if requested algorithm is not supported, ERR_PTR(-ENOMEM) in
+- * case of allocation error, or any other error potentially
+- * returned by zcomp_init().
+- */
+-struct zcomp *zcomp_create(const char *compress)
++struct zcomp *zcomp_create(const char *alg, struct zcomp_params *params)
+ {
+ 	struct zcomp *comp;
+ 	int error;
+ 
+ 	/*
+-	 * Crypto API will execute /sbin/modprobe if the compression module
+-	 * is not loaded yet. We must do it here, otherwise we are about to
+-	 * call /sbin/modprobe under CPU hot-plug lock.
++	 * The backends array has a sentinel NULL value, so the minimum
++	 * size is 1. In order to be valid the array, apart from the
++	 * sentinel NULL element, should have at least one compression
++	 * backend selected.
+ 	 */
+-	if (!zcomp_available_algorithm(compress))
+-		return ERR_PTR(-EINVAL);
++	BUILD_BUG_ON(ARRAY_SIZE(backends) <= 1);
+ 
+ 	comp = kzalloc(sizeof(struct zcomp), GFP_KERNEL);
+ 	if (!comp)
+ 		return ERR_PTR(-ENOMEM);
+ 
+-	comp->name = compress;
+-	error = zcomp_init(comp);
++	comp->ops = lookup_backend_ops(alg);
++	if (!comp->ops) {
++		kfree(comp);
++		return ERR_PTR(-EINVAL);
++	}
++
++	error = zcomp_init(comp, params);
+ 	if (error) {
+ 		kfree(comp);
+ 		return ERR_PTR(error);
+diff --git a/drivers/block/zram/zcomp.h b/drivers/block/zram/zcomp.h
+index 40f6420f4b2e..3e8ae3844486 100644
+--- a/drivers/block/zram/zcomp.h
++++ b/drivers/block/zram/zcomp.h
+@@ -1,24 +1,77 @@
+ /* SPDX-License-Identifier: GPL-2.0-or-later */
+-/*
+- * Copyright (C) 2014 Sergey Senozhatsky.
+- */
+ 
+ #ifndef _ZCOMP_H_
+ #define _ZCOMP_H_
++
+ #include <linux/local_lock.h>
+ 
++#define ZCOMP_PARAM_NOT_SET	INT_MIN
++
++/*
++ * Immutable driver (backend) parameters. The driver may attach private
++ * data to it (e.g. driver representation of the dictionary, etc.).
++ *
++ * This data is kept per-comp and is shared among execution contexts.
++ */
++struct deflate_params {
++	s32 winbits;
++};
++
++struct zcomp_params {
++	void *dict;
++	size_t dict_sz;
++	s32 level;
++	union {
++		struct deflate_params deflate;
++	};
++
++	void *drv_data;
++};
++
++/*
++ * Run-time driver context - scratch buffers, etc. It is modified during
++ * request execution (compression/decompression), cannot be shared, so
++ * it's in per-CPU area.
++ */
++struct zcomp_ctx {
++	void *context;
++};
++
+ struct zcomp_strm {
+-	/* The members ->buffer and ->tfm are protected by ->lock. */
+ 	local_lock_t lock;
+-	/* compression/decompression buffer */
++	/* compression buffer */
+ 	void *buffer;
+-	struct crypto_comp *tfm;
++	struct zcomp_ctx ctx;
++};
++
++struct zcomp_req {
++	const unsigned char *src;
++	const size_t src_len;
++
++	unsigned char *dst;
++	size_t dst_len;
++};
++
++struct zcomp_ops {
++	int (*compress)(struct zcomp_params *params, struct zcomp_ctx *ctx,
++			struct zcomp_req *req);
++	int (*decompress)(struct zcomp_params *params, struct zcomp_ctx *ctx,
++			  struct zcomp_req *req);
++
++	int (*create_ctx)(struct zcomp_params *params, struct zcomp_ctx *ctx);
++	void (*destroy_ctx)(struct zcomp_ctx *ctx);
++
++	int (*setup_params)(struct zcomp_params *params);
++	void (*release_params)(struct zcomp_params *params);
++
++	const char *name;
+ };
+ 
+ /* dynamic per-device compression frontend */
+ struct zcomp {
+ 	struct zcomp_strm __percpu *stream;
+-	const char *name;
++	const struct zcomp_ops *ops;
++	struct zcomp_params *params;
+ 	struct hlist_node node;
+ };
+ 
+@@ -27,17 +80,15 @@ int zcomp_cpu_dead(unsigned int cpu, struct hlist_node *node);
+ ssize_t zcomp_available_show(const char *comp, char *buf);
+ bool zcomp_available_algorithm(const char *comp);
+ 
+-struct zcomp *zcomp_create(const char *comp);
++struct zcomp *zcomp_create(const char *alg, struct zcomp_params *params);
+ void zcomp_destroy(struct zcomp *comp);
+ 
+ struct zcomp_strm *zcomp_stream_get(struct zcomp *comp);
+ void zcomp_stream_put(struct zcomp *comp);
+ 
+-int zcomp_compress(struct zcomp_strm *zstrm,
+-		const void *src, unsigned int *dst_len);
+-
+-int zcomp_decompress(struct zcomp_strm *zstrm,
+-		const void *src, unsigned int src_len, void *dst);
++int zcomp_compress(struct zcomp *comp, struct zcomp_strm *zstrm,
++		   const void *src, unsigned int *dst_len);
++int zcomp_decompress(struct zcomp *comp, struct zcomp_strm *zstrm,
++		     const void *src, unsigned int src_len, void *dst);
+ 
+-bool zcomp_set_max_streams(struct zcomp *comp, int num_strm);
+ #endif /* _ZCOMP_H_ */
+diff --git a/drivers/block/zram/zram_drv.c b/drivers/block/zram/zram_drv.c
+index ad020cde36f0..22dc61a19195 100644
+--- a/drivers/block/zram/zram_drv.c
++++ b/drivers/block/zram/zram_drv.c
+@@ -27,6 +27,7 @@
+ #include <linux/backing-dev.h>
+ #include <linux/string.h>
+ #include <linux/vmalloc.h>
++#include <linux/kernel_read_file.h>
+ #include <linux/err.h>
+ #include <linux/idr.h>
+ #include <linux/sysfs.h>
+@@ -1277,6 +1278,100 @@ static ssize_t max_comp_streams_store(struct device *dev,
+ 	return len;
+ }
+ 
++static void comp_params_reset(struct zram *zram)
++{
++	struct zcomp_params *params = &zram->params;
++
++	vfree(params->dict);
++	params->level = ZCOMP_PARAM_NOT_SET;
++	params->deflate.winbits = ZCOMP_PARAM_NOT_SET;
++	params->dict_sz = 0;
++	params->dict = NULL;
++}
++
++static int comp_params_store(struct zram *zram, s32 level,
++			     const char *dict_path,
++			     struct deflate_params *deflate_params)
++{
++	ssize_t sz = 0;
++
++	comp_params_reset(zram);
++
++	if (dict_path) {
++		sz = kernel_read_file_from_path(dict_path, 0,
++						&zram->params.dict,
++						INT_MAX,
++						NULL,
++						READING_POLICY);
++		if (sz < 0)
++			return -EINVAL;
++	}
++
++	zram->params.dict_sz = sz;
++	zram->params.level = level;
++	zram->params.deflate.winbits = deflate_params->winbits;
++	return 0;
++}
++
++static ssize_t algorithm_params_store(struct device *dev,
++				      struct device_attribute *attr,
++				      const char *buf,
++				      size_t len)
++{
++	s32 level = ZCOMP_PARAM_NOT_SET;
++	char *args, *param, *val, *dict_path = NULL;
++	struct deflate_params deflate_params;
++	struct zram *zram = dev_to_zram(dev);
++	int ret;
++
++	deflate_params.winbits = ZCOMP_PARAM_NOT_SET;
++
++	args = skip_spaces(buf);
++	while (*args) {
++		args = next_arg(args, &param, &val);
++
++		if (!val || !*val)
++			return -EINVAL;
++
++		/*
++		 * Single-compression-stream zram: "priority" and "algo"
++		 * select the target comp slot upstream, there is only one
++		 * here, so accept and ignore them.
++		 */
++		if (!strcmp(param, "priority") || !strcmp(param, "algo"))
++			continue;
++
++		if (!strcmp(param, "level")) {
++			ret = kstrtoint(val, 10, &level);
++			if (ret)
++				return ret;
++			continue;
++		}
++
++		if (!strcmp(param, "dict")) {
++			dict_path = val;
++			continue;
++		}
++
++		if (!strcmp(param, "deflate.winbits")) {
++			ret = kstrtoint(val, 10, &deflate_params.winbits);
++			if (ret)
++				return ret;
++			continue;
++		}
++	}
++
++	down_write(&zram->init_lock);
++	if (init_done(zram)) {
++		up_write(&zram->init_lock);
++		return -EBUSY;
++	}
++
++	ret = comp_params_store(zram, level, dict_path, &deflate_params);
++	up_write(&zram->init_lock);
++	return ret ? ret : len;
++}
++
+ static ssize_t comp_algorithm_show(struct device *dev,
+ 		struct device_attribute *attr, char *buf)
+ {
+@@ -1576,7 +1671,7 @@ static int __zram_bvec_read(struct zram *zram, struct page *page, u32 index,
+ 		ret = 0;
+ 	} else {
+ 		dst = kmap_atomic(page);
+-		ret = zcomp_decompress(zstrm, src, size, dst);
++		ret = zcomp_decompress(zram->comp, zstrm, src, size, dst);
+ 		kunmap_atomic(dst);
+ 		zcomp_stream_put(zram->comp);
+ 	}
+@@ -1647,7 +1742,7 @@ static int __zram_bvec_write(struct zram *zram, struct bio_vec *bvec,
+ compress_again:
+ 	zstrm = zcomp_stream_get(zram->comp);
+ 	src = kmap_atomic(page);
+-	ret = zcomp_compress(zstrm, src, &comp_len);
++	ret = zcomp_compress(zram->comp, zstrm, src, &comp_len);
+ 	kunmap_atomic(src);
+ 
+ 	if (unlikely(ret)) {
+@@ -2039,7 +2134,7 @@ static ssize_t disksize_store(struct device *dev,
+ 		goto out_unlock;
+ 	}
+ 
+-	comp = zcomp_create(zram->compressor);
++	comp = zcomp_create(zram->compressor, &zram->params);
+ 	if (IS_ERR(comp)) {
+ 		pr_err("Cannot initialise %s compressing backend\n",
+ 				zram->compressor);
+@@ -2133,6 +2228,7 @@ static DEVICE_ATTR_WO(mem_used_max);
+ static DEVICE_ATTR_WO(idle);
+ static DEVICE_ATTR_RW(max_comp_streams);
+ static DEVICE_ATTR_RW(comp_algorithm);
++static DEVICE_ATTR_WO(algorithm_params);
+ #ifdef CONFIG_ZRAM_WRITEBACK
+ static DEVICE_ATTR_RW(backing_dev);
+ static DEVICE_ATTR_WO(writeback);
+@@ -2150,6 +2246,7 @@ static struct attribute *zram_disk_attrs[] = {
+ 	&dev_attr_idle.attr,
+ 	&dev_attr_max_comp_streams.attr,
+ 	&dev_attr_comp_algorithm.attr,
++	&dev_attr_algorithm_params.attr,
+ #ifdef CONFIG_ZRAM_WRITEBACK
+ 	&dev_attr_backing_dev.attr,
+ 	&dev_attr_writeback.attr,
+@@ -2237,6 +2334,8 @@ static int zram_add(void)
+ 		blk_queue_max_write_zeroes_sectors(zram->disk->queue, UINT_MAX);
+ 
+ 	blk_queue_flag_set(QUEUE_FLAG_STABLE_WRITES, zram->disk->queue);
++	comp_params_reset(zram);
++
+ 	ret = device_add_disk(NULL, zram->disk, zram_disk_groups);
+ 	if (ret)
+ 		goto out_cleanup_disk;
+@@ -2299,6 +2398,7 @@ static int zram_remove(struct zram *zram)
+ 	 */
+ 	zram_reset_device(zram);
+ 
++	comp_params_reset(zram);
+ 	put_disk(zram->disk);
+ 	kfree(zram);
+ 	return 0;
+diff --git a/drivers/block/zram/zram_drv.h b/drivers/block/zram/zram_drv.h
+index c947b049ac9e..8c29a56b5e8d 100644
+--- a/drivers/block/zram/zram_drv.h
++++ b/drivers/block/zram/zram_drv.h
+@@ -100,6 +100,7 @@ struct zram {
+ 	struct zram_table_entry *table;
+ 	struct zs_pool *mem_pool;
+ 	struct zcomp *comp;
++	struct zcomp_params params;
+ 	struct gendisk *disk;
+ 	/* Prevent concurrent execution of device init */
+ 	struct rw_semaphore init_lock;
+diff --git a/include/linux/lz4.h b/include/linux/lz4.h
+index 025b2a0cc125..fca7865213c7 100644
+--- a/include/linux/lz4.h
++++ b/include/linux/lz4.h
+@@ -8,6 +8,7 @@
+ #include "../../lib/lz4/lz4hc.h"
+ 
+ #define LZ4_MEM_COMPRESS	LZ4_STREAM_MINSIZE
++#define LZ4_ACCELERATION_DEFAULT	1
+ #define LZ4HC_MEM_COMPRESS	LZ4_STREAMHC_MINSIZE
+ 
+ #define LZ4HC_MIN_CLEVEL	LZ4HC_CLEVEL_MIN
+diff --git a/lib/lz4/lz4.c b/lib/lz4/lz4.c
+index 112edb700469..dd365c72e5d6 100644
+--- a/lib/lz4/lz4.c
++++ b/lib/lz4/lz4.c
+@@ -2099,6 +2099,7 @@ int LZ4_compress_fast_continue(LZ4_stream_t *LZ4_stream, const char *source,
+ 		return result;
+ 	}
+ }
++EXPORT_SYMBOL(LZ4_compress_fast_continue);
+ 
+ /* Hidden debug function, to force-test external dictionary mode */
+ int LZ4_compress_forceExtDict(LZ4_stream_t *LZ4_dict, const char *source,
+diff --git a/lib/lz4/lz4hc.c b/lib/lz4/lz4hc.c
+index 7b382044d449..08e2e0ac2d2a 100644
+--- a/lib/lz4/lz4hc.c
++++ b/lib/lz4/lz4hc.c
+@@ -2026,6 +2026,7 @@ void LZ4_resetStreamHC(LZ4_streamHC_t *LZ4_streamHCPtr, int compressionLevel)
+ 	LZ4_initStreamHC(LZ4_streamHCPtr, sizeof(*LZ4_streamHCPtr));
+ 	LZ4_setCompressionLevel(LZ4_streamHCPtr, compressionLevel);
+ }
++EXPORT_SYMBOL(LZ4_resetStreamHC);
+ 
+ void LZ4_resetStreamHC_fast(LZ4_streamHC_t *LZ4_streamHCPtr,
+ 			    int compressionLevel)
+-- 
+2.55.0
+
