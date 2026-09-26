@@ -560,8 +560,6 @@ jobs:
         # 设置编译机器信息
         KBUILD_BUILD_USER=build-user
         KBUILD_BUILD_HOST=build-host
-        echo "检查core.c"
-        cat kernel/sched/core.c
         echo "检查core.c变动"
         git diff kernel/sched/core.c
 
