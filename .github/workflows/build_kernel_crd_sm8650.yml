@@ -163,10 +163,9 @@ jobs:
             wget -q --show-progress -O "$ZYC_TARBALL" "$ZYC_URL"
 
             echo "Extracting $ZYC_TARBALL ..."
-            tar -xzf "$ZYC_TARBALL"
-
-            # 解压后应得到 Clang-23.0.0git-20260130 目录
             CLANG_DIR_NAME="Clang-23.0.0git-20260130"
+            mkdir $CLANG_DIR_NAME
+            tar -xzf "$ZYC_TARBALL" -C $CLANG_DIR_NAME
 
             if [[ ! -d "$CLANG_DIR_NAME" ]]; then
                 echo "ERROR: 解压后未找到目录 $CLANG_DIR_NAME"
