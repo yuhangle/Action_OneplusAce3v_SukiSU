@@ -1,0 +1,589 @@
+name: Build Kernel ReSukiSU with crdroid sm8650 (OnePlus Ace 3V)(自用)
+
+on:
+  workflow_dispatch:
+    inputs:
+      KERNEL_NAME:
+        description: '自定义内核名称'
+        required: false
+        default: 'android14-11-yuhangKernel'
+      CUSTOM_NAME_ENABLED:
+        description: '是否启用自定义内核名 (禁用此选项将不添加内核名后缀)'
+        required: true
+        default: false
+        type: boolean
+      USE_FAKE_TIME:
+        description: '是否伪造构建时间 (true/false)'
+        required: true
+        default: false
+        type: boolean
+      FAKE_TIME_VAL:
+        description: '伪造的时间戳 (仅当启用伪造时间时生效)'
+        required: false
+        default: 'Sat Aug 1 00:00:00 UTC 2026'
+      ENABLE_SUSFS:
+        description: '是否启用susfs (true/false)'
+        required: true
+        default: false
+        type: boolean
+      LLVM_CHOOSE:
+        description: '选择用于构建的工具链(不懂就保持默认)'
+        required: true
+        default: 'Zyc Clang23'
+        type: choice
+        options:
+          - 'Google官方工具链'
+          - 'Zyc Clang23'
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    
+    env:
+      # CCACHE 配置 (4G 安全限制)
+      CCACHE_DIR: ${{ github.workspace }}/.ccache_dir
+      CCACHE_MAXSIZE: 4G 
+      CCACHE_NOHASHDIR: 'true'
+      CCACHE_HARDLINK: 'true'
+      CCACHE_COMPILERCHECK: '%compiler% -dumpmachine; %compiler% -dumpversion'
+
+    steps:
+    - name: Maximize build space
+      uses: easimon/maximize-build-space@master
+      with:
+        root-reserve-mb: 8192
+        temp-reserve-mb: 2048
+        remove-dotnet: 'true'
+        remove-android: 'true'
+        remove-haskell: 'true'
+        remove-codeql: 'true'
+        
+    - name: Checkout Workflow
+      uses: actions/checkout@v4
+
+    - name: Create and Enable 4G Swap
+      run: |
+        sudo swapoff -a
+        sudo fallocate -l 4G /swapfile
+        sudo chmod 600 /swapfile
+        sudo mkswap /swapfile
+        sudo swapon /swapfile
+        free -h
+
+    - name: Install Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libelf-dev libssl-dev flex bison cpio dwarves bc ccache
+        sudo apt-get install -y git gnupg gperf build-essential zip curl zlib1g-dev gcc-multilib g++-multilib lib32ncurses5-dev x11proto-core-dev libx11-dev lib32z1-dev libgl1-mesa-dev unzip python3 python3-pip
+        
+        git config --global user.name "GitHub Action"
+        git config --global user.email "action@github.com"
+
+    - name: Restore Ccache (Skipping Save)
+      uses: actions/cache@v4
+      with:
+        path: ${{ env.CCACHE_DIR }}
+        # 修复后的 Key 定义，直接在 step 中引用 ${{ runner.os }} 和 ${{ hashFiles(...) }}
+        key: ccache-${{ runner.os }}-${{ hashFiles('kernel_workspace/kernel_platform/common/build.config*') }}-v2-${{ github.event.inputs.KERNEL_NAME }}
+        restore-keys: |
+          ccache-${{ runner.os }}-${{ hashFiles('kernel_workspace/kernel_platform/common/build.config*') }}-v2-
+          ccache-${{ runner.os }}-
+
+    - name: Initialize Ccache
+      run: |
+        if command -v ccache >/dev/null 2>&1; then
+          echo "CCACHE 目录: ${{ env.CCACHE_DIR }}"
+          mkdir -p "${{ env.CCACHE_DIR }}"
+          ccache -M ${{ env.CCACHE_MAXSIZE }}
+          echo "✅ ccache 初始化完成"
+        else
+          echo "❌ 未安装 ccache，跳过"
+        fi
+        ccache -s
+
+    - name: Install Repo Tool
+      run: |
+        mkdir -p ~/bin
+        curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+        chmod a+x ~/bin/repo
+        echo "$HOME/bin" >> $GITHUB_PATH
+
+    - name: ⬇️ Download Clang Toolchain
+      env:
+        LLVM_CHOOSE: ${{ inputs.LLVM_CHOOSE || 'Google官方工具链' }}
+      run: |
+        set -e
+
+        # ============ 公共：创建目录 ============
+        mkdir -p $GITHUB_WORKSPACE/kernel_workspace/build-tools/clang
+        echo "Created directory: $GITHUB_WORKSPACE/kernel_workspace/build-tools/clang"
+        cd $GITHUB_WORKSPACE/kernel_workspace/build-tools/clang
+
+        # ============ 工具链选择 ============
+        case "$LLVM_CHOOSE" in
+          "Google官方工具链")
+            echo "🔧 使用 Google 官方工具链"
+
+            CLANG_REPO="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86"
+            CLANG_REF="android-gs-akita-6.1-android16-dp"
+
+            echo "Cloning Clang repo from $CLANG_REPO at ref $CLANG_REF"
+            git clone --depth 1 $CLANG_REPO -b $CLANG_REF temp_clang_repo
+
+            CLANG_BASE_PATH="$GITHUB_WORKSPACE/kernel_workspace/build-tools/clang/temp_clang_repo"
+            CLANG_DIR_NAME=$(find $CLANG_BASE_PATH -maxdepth 1 -type d -name "clang-r*" -exec basename {} \; | head -n 1)
+
+            if [[ -z "$CLANG_DIR_NAME" ]]; then
+                echo "ERROR: Clang directory (clang-r*) not found in the downloaded repository."
+                exit 1
+            fi
+
+            mv $CLANG_BASE_PATH/$CLANG_DIR_NAME .
+            rm -rf temp_clang_repo
+            echo "✅ Clang toolchain $CLANG_DIR_NAME downloaded and moved."
+            ;;
+
+          "Zyc Clang23")
+            echo "🔧 使用 Zyc Clang23 工具链"
+
+            ZYC_URL="https://github.com/ZyCromerZ/Clang/releases/download/23.0.0git-20260130-release/Clang-23.0.0git-20260130.tar.gz"
+            ZYC_TARBALL="Clang-23.0.0git-20260130.tar.gz"
+
+            echo "Downloading Zyc Clang from $ZYC_URL"
+            wget -q --show-progress -O "$ZYC_TARBALL" "$ZYC_URL"
+
+            echo "Extracting $ZYC_TARBALL ..."
+            CLANG_DIR_NAME="Clang-23.0.0git-20260130"
+            mkdir $CLANG_DIR_NAME
+            tar -xzf "$ZYC_TARBALL" -C $CLANG_DIR_NAME
+
+            if [[ ! -d "$CLANG_DIR_NAME" ]]; then
+                echo "ERROR: 解压后未找到目录 $CLANG_DIR_NAME"
+                ls -la
+                exit 1
+            fi
+
+            # 校验一下 bin 目录存在
+            if [[ ! -x "$CLANG_DIR_NAME/bin/clang" ]]; then
+                echo "ERROR: $CLANG_DIR_NAME/bin/clang 不存在或不可执行"
+                ls -la "$CLANG_DIR_NAME"
+                exit 1
+            fi
+
+            rm -f "$ZYC_TARBALL"
+            echo "✅ Clang toolchain $CLANG_DIR_NAME downloaded and extracted."
+            ;;
+
+          *)
+            echo "ERROR: 未知的 LLVM_CHOOSE 值: $LLVM_CHOOSE"
+            exit 1
+            ;;
+        esac
+
+        # ============ 公共：设置 CLANG_PATH ============
+        CLANG_TOOLCHAIN_DIR="$GITHUB_WORKSPACE/kernel_workspace/build-tools/clang/$CLANG_DIR_NAME"
+        echo "CLANG_PATH=$CLANG_TOOLCHAIN_DIR/bin" >> $GITHUB_ENV
+        echo "✅ Set CLANG_PATH environment variable."
+        CLANG_PATH=$CLANG_TOOLCHAIN_DIR/bin
+        $CLANG_PATH/clang --version
+
+    - name: Initialize & Sync Kernel Source
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace
+        
+        # 检查缓存是否命中
+        if [[ "${{ steps.cache-kernel.outputs.cache-hit }}" != "true" ]]; then
+          echo "[*] 缓存未命中，开始使用 Git 初始化并同步源码..."
+          
+          # 1. 创建 kernel_platform 目录
+          mkdir kernel_platform
+          cd kernel_platform
+          
+          # 2. 拉取 msm-kernel 仓库
+          echo "[*] 克隆 msm-kernel 仓库..."
+          mkdir msm-kernel
+          cd msm-kernel
+          git init
+          git remote add origin https://github.com/OnePlusOSS/android_kernel_oneplus_sm7675
+          git fetch --depth=1 origin oneplus/sm7675_b_16.0.0_ace_3v
+          git checkout FETCH_HEAD
+          cd .. # 回到 kernel_platform
+          
+          # 3. 拉取 common 仓库
+          echo "[*] 克隆 common 仓库..."
+          mkdir common
+          cd common
+          git init
+          git remote add origin https://github.com/yuhangle/android_kernel_oneplus_sm8650
+          git fetch --depth=1 origin 16.0
+          git checkout FETCH_HEAD
+          cd .. # 回到 kernel_platform
+          
+          cd .. # 回到 kernel_workspace
+          
+          # 4. 拉取 modules/devicetree 仓库，并同步到 workspace
+          echo "[*] 克隆 modules/devicetree 仓库并同步文件..."
+          mkdir tmp
+          cd tmp
+          git init
+          git remote add origin https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm7675
+          git fetch --depth=1 origin oneplus/sm7675_b_16.0.0_ace_3v
+          git checkout FETCH_HEAD
+          
+          # 将 tmp 目录下的 kernel_platform 和 vendor 文件夹同步到 kernel_workspace 根目录
+          rsync -a ./kernel_platform/ ../kernel_platform/
+          mv ./vendor ../
+          
+          cd .. # 回到 kernel_workspace
+          rm -rf tmp # 清理临时目录
+          
+          echo "[*] 源码同步完成！"
+        else
+          echo "[*] 源码缓存命中，跳过初始化和同步。"
+        fi
+        
+    - name: Run Build Script (SUKISU Logic)
+      env:
+        KERNEL_NAME: ${{ inputs.KERNEL_NAME }}
+        CUSTOM_NAME_ENABLED: ${{ inputs.CUSTOM_NAME_ENABLED }}
+        USE_FAKE_TIME: ${{ inputs.USE_FAKE_TIME }}
+        KBUILD_BUILD_TIMESTAMP: ${{ inputs.FAKE_TIME_VAL }}
+        ENABLE_SUSFS: ${{ inputs.ENABLE_SUSFS }}
+        ENABLE_NEW_ZRAM: ${{ inputs.ENABLE_NEW_ZRAM }}
+        ENABLE_FC: ${{ inputs.ENABLE_FC }}
+        # Kernel 配置参数
+        CPU: 'sm7675'
+        FEIL: 'oneplus_ace3_v_v'
+        CPUD: 'pineapple'
+        ANDROID_VERSION: 'android14'
+        KERNEL_VERSION: '6.1'
+        CROSS_COMPILE: aarch64-linux-gnu-
+        CROSS_COMPILE_COMPAT: arm-linux-gnueabi-
+        android_release: android14
+        kmi_generation: 11
+
+      run: |
+        # 1. 验证 Clang 路径
+        if [[ -z "$CLANG_PATH" ]]; then
+            echo "FATAL ERROR: CLANG_PATH environment variable not set. Build cannot proceed."
+            exit 1
+        fi
+        
+        echo "✅ Detected Clang path: $CLANG_PATH"
+        
+        # 2. PATH 环境变量设定
+        export PATH="/usr/lib/ccache:$CLANG_PATH:$PATH"
+        
+        # 3. 进入源码目录
+        cd $GITHUB_WORKSPACE/kernel_workspace
+        
+        # 构建时间处理
+        if [[ "$USE_FAKE_TIME" != "true" ]]; then
+            unset KBUILD_BUILD_TIMESTAMP
+        else
+            export KBUILD_BUILD_TIMESTAMP
+        fi
+
+        # 拉取补丁仓库
+        git clone https://github.com/yuhangle/Action_OneplusAce3v_SukiSU kernel_patch
+        export PATCH_PATH="$(pwd)/kernel_patch"
+
+        cd kernel_platform/common
+        # 拉取合并脚本
+        curl -LSs "https://raw.githubusercontent.com/yuhangle/Action_OneplusAce3v_SukiSU/master/shell/merge.sh" -o merge.sh
+        chmod +x ./merge.sh
+        ./merge.sh
+        cd ../..
+        
+        # ------------------------------
+        # 清理 & 修改 setlocalversion
+        # ------------------------------
+        rm kernel_platform/common/android/abi_gki_protected_exports_* 2>/dev/null || true
+        rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* 2>/dev/null || true
+
+        cd kernel_platform
+        for dir in common msm-kernel external/dtc; do
+            if [[ -f "$dir/scripts/setlocalversion" ]]; then
+                sed -i 's/ -dirty//g' "$dir/scripts/setlocalversion"
+                sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' "$dir/scripts/setlocalversion"
+            fi
+        done
+
+        # 只有在启用自定义名称时才添加后缀
+        if [[ "$CUSTOM_NAME_ENABLED" == "true" ]] && [[ -n "$KERNEL_NAME" ]]; then
+            sed -i "\$s|echo \"\$res\"|echo \"-$KERNEL_NAME\"|" common/scripts/setlocalversion
+        fi
+        cd ..
+
+        # ------------------------------
+        # 集成 ReSukiSU
+        # ------------------------------
+        cd kernel_platform
+        curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
+
+        # 提取 KSU 版本号并导出到环境变量
+        cd KernelSU
+        KSU_VERSION=$(( $(git rev-list --count main) + 30700 ))
+        echo "KSU_VERSION=$KSU_VERSION" >> $GITHUB_ENV
+        cd ../..
+
+        # ------------------------------
+        # 应用 SukiSU_patch
+        # ------------------------------
+        git clone https://github.com/ShirkNeko/SukiSU_patch.git
+        
+        cd kernel_platform/common
+        
+        # 加入风驰内核补丁(在Crdroid上测试,可能有效果,配合手动调用,不保证有效)
+        if [[ "$ENABLE_FC" == "true" ]]; then
+            cp $PATCH_PATH/patch/fengchi/*.patch ./
+            echo "打多风驰内核移植补丁"
+            patch -p1 < 6.1-sched-ext-hmbird-fengchi.patch || true
+            echo "CONFIG_SLIM_SCHED=y" >> ./arch/arm64/configs/gki_defconfig
+            echo "CONFIG_SCHED_CLASS_EXT=y" >> ./arch/arm64/configs/gki_defconfig
+        fi
+
+        # susfs补丁
+        if [[ "$ENABLE_SUSFS" == "true" ]]; then
+            cd ../..
+            git clone https://gitlab.com/simonpunk/susfs4ksu.git  -b gki-$ANDROID_VERSION-$KERNEL_VERSION
+            cd kernel_platform
+            cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-$ANDROID_VERSION-$KERNEL_VERSION.patch ./common/
+            cp ../susfs4ksu/kernel_patches/fs/* ./common/fs/
+            cp ../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
+            echo "正在给内核打susfs补丁"
+            cd ./common
+
+            echo "===== 当前目录 ====="
+            pwd
+
+            echo "===== 删除 namespace hook ====="
+            sed -i '/#include <trace\/hooks\/blk\.h>/d' ./fs/namespace.c
+
+            echo "===== 开始 SUSFS patch ====="
+            patch -p1 < 50_add_susfs_in_gki-$ANDROID_VERSION-$KERNEL_VERSION.patch
+
+            echo "===== 恢复 namespace hook ====="
+            sed -i '/#include "internal.h"/a #include <trace/hooks/blk.h>' ./fs/namespace.c
+
+            # 打隐藏应用补丁
+            cp ../../SukiSU_patch/69_hide_stuff.patch ./
+            patch -p1 -F 3 < 69_hide_stuff.patch || true
+        else
+            # 打ksu补丁
+            curl -LSs "https://raw.githubusercontent.com/yuhangle/Action_OneplusAce3v_SukiSU/master/patch/ksu_hooks.patch" -o ksu_hooks.patch
+            patch -p1 < ksu_hooks.patch || true
+
+            # 打隐藏应用补丁
+            cp ../../SukiSU_patch/69_hide_stuff.patch ./
+            patch -p1 -F 3 < 69_hide_stuff.patch || true
+        fi
+        
+        cd ..
+
+        # ------------------------------
+        # 配置 defconfig
+        # ------------------------------
+        cd common
+        echo "CONFIG_KSU=y" >> ./arch/arm64/configs/gki_defconfig
+        # susfs配置
+        if [[ "$ENABLE_SUSFS" == "true" ]]; then
+            echo "CONFIG_KSU_SUSFS=y" >> ./arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> ./arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> ./arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> ./arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y" >> ./arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y" >> ./arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> ./arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> ./arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y" >> ./arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> ./arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> ./arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> ./arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> ./arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> ./arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_SUS_MAP=y" >> ./arch/arm64/configs/gki_defconfig
+        else
+            echo "CONFIG_KSU_SUSFS=n" >> ./arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_MANUAL_HOOK" >> ./arch/arm64/configs/gki_defconfig
+        fi
+
+        # tmpfs相关
+        echo "CONFIG_TMPFS_XATTR=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_TMPFS_POSIX_ACL=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_FHANDLE=y" >> ./arch/arm64/configs/gki_defconfig
+
+        # 开启O2编译优化
+        echo "CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y" >> ./arch/arm64/configs/gki_defconfig
+
+        # 跳过将uapi标准头安装到 usr/include 目录的不必要操作，节省编译时间
+        echo "CONFIG_HEADERS_INSTALL=n" >> ./arch/arm64/configs/gki_defconfig
+
+        # 启用 BPF 流解析器,实现高性能网络流量处理,增强网络监控和分析能力
+        echo "CONFIG_BPF_STREAM_PARSER=y" >> ./arch/arm64/configs/gki_defconfig
+
+        #开启增强 Netfilter 防火墙扩展模块,支持基于地址类型的匹配规则,启用 IP 集合支持,提高防火墙规则灵活性,支持更复杂的流量过滤策略
+        echo "CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_NETFILTER_XT_SET=y" >> ./arch/arm64/configs/gki_defconfig
+        #启用 IP 集框架及其多种数据结构实现,提供高效的大规模 IP 地址管理,提高防火墙规则处理效率,减少内存占用
+        echo "CONFIG_IP_SET=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_IP_SET_MAX=65534" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_IP_SET_BITMAP_IP=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_IP_SET_BITMAP_IPMAC=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_IP_SET_BITMAP_PORT=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_IP_SET_HASH_IP=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_IP_SET_HASH_IPMARK=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_IP_SET_HASH_IPPORT=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_IP_SET_HASH_IPPORTIP=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_IP_SET_HASH_IPPORTNET=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_IP_SET_HASH_IPMAC=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_IP_SET_HASH_MAC=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_IP_SET_HASH_NETPORTNET=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_IP_SET_HASH_NET=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_IP_SET_HASH_NETNET=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_IP_SET_HASH_NETPORT=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_IP_SET_HASH_NETIFACE=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_IP_SET_LIST_SET=y" >> ./arch/arm64/configs/gki_defconfig
+        #启用 IPv6 网络地址转换
+        echo "CONFIG_IP6_NF_NAT=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_IP6_NF_TARGET_MASQUERADE=y" >> ./arch/arm64/configs/gki_defconfig
+
+        # BBR算法
+        echo "CONFIG_TCP_CONG_ADVANCED=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_TCP_CONG_BBR=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_TCP_CONG_CUBIC=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_NET_SCH_FQ=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_DEFAULT_BBR=y" >> ./arch/arm64/configs/gki_defconfig
+
+        #开启DroidSpace所需要的内核配置
+        echo "CONFIG_SYSVIPC=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_IPC_NS=y" >> ./arch/arm64/configs/gki_defconfig
+        sed -i '/^# CONFIG_PID_NS is not set$/d' ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_PID_NS=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_DEVTMPFS=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_USER_NS=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_NETFILTER_XT_TARGET_REJECT=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_NETFILTER_XT_TARGET_LOG=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_NETFILTER_XT_MATCH_RECENT=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_IP_SET=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_IP_SET_HASH_IP=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_IP_SET_HASH_NET=y" >> ./arch/arm64/configs/gki_defconfig
+        echo "CONFIG_NETFILTER_XT_SET=y" >> ./arch/arm64/configs/gki_defconfig
+
+
+        echo "CONFIG_BBG=y" >> ./arch/arm64/configs/gki_defconfig
+        wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash || true
+
+        # 增加DroidSpace支持
+        wget https://raw.githubusercontent.com/ravindu644/Droidspaces-OSS/refs/heads/main/Documentation/resources/kernel-patches/GKI/below-kernel-6.12/001.GKI-below-6.12-fix_sysvipc_kabi_6_7_8.patch
+
+        patch -p1 -F3 < ./001.GKI-below-6.12-fix_sysvipc_kabi_6_7_8.patch || true  
+
+        # 加入ZRAM相关移植
+        if [[ "$ENABLE_NEW_ZRAM" == "true" ]]; then
+            cp $PATCH_PATH/patch/zram/*.patch ./
+            echo "打zstd 1.5.7补丁"
+            patch -p1 < ./6.1-zstd-upgrade-v1.5.7-from-android17-6.18.patch || true
+
+            echo "打lz4 1.10.0补丁"
+            patch -p1 < ./lz4-upgrade-v1.10.0-arm64-neon.patch || true
+
+            echo "打zram后端移植补丁"
+            patch -p1 < 6.1-zram-backend-api-and-dict-from-6.14.patch || true
+
+            echo "打多压缩流移植补丁"
+            patch -p1 < 6.1-zram-multi-comp-and-recompression.patch || true
+
+            echo "打多适配新zram后端的lz4kd补丁"
+            cp -r $PATCH_PATH/patch/zram/lz4kd_6.1_backend/files/* ./
+            cp $PATCH_PATH/patch/zram/lz4kd_6.1_backend/*.patch ./
+            patch -p1 < lz4kd-6.1-backend.patch || true
+        fi
+
+        echo "修复69_hide_stuff.patch引入编译错误"
+
+        sed -i 's/struct dentry \*dentry[[:space:]]*;/struct dentry *dentry = NULL;/' ./fs/proc/task_mmu.c
+
+        sed -i '/^		if (key_pass)$/{
+        N
+        /^		if (key_pass)\n			ERR(!ENGINE_ctrl_cmd_string(e, "PIN", key_pass, 0), "Set PKCS#11 PIN");$/c\
+        #ifdef USE_PKCS11_ENGINE\
+            if (key_pass)\
+                ERR(!ENGINE_ctrl_cmd_string(e, "PIN", key_pass, 0), "Set PKCS#11 PIN");\
+        #endif
+        }' certs/extract-cert.c
+
+
+        cd ..
+
+        sed -i "/stable_scmversion_cmd/s/-maybe-dirty//g" ./build/kernel/kleaf/impl/stamp.bzl
+
+        # ------------------------------
+        # 开始编译
+        # ------------------------------
+        echo "[*] 开始配置..."
+        cd common
+        
+        make LLVM=1 LLVM_IAS=1 ARCH=arm64 CC=clang HOSTCC=clang HOSTCXX=clang++ O=out gki_defconfig
+        
+        scripts/config --file out/.config -e LTO_CLANG -d LTO_NONE -e LTO_CLANG_THIN -d LTO_CLANG_FULL -e THINLTO -d ARM64_BTI_KERNEL
+        scripts/config --file out/.config --set-str CONFIG_LSM "lockdown,baseband_guard,yama,selinux"
+
+        # 确保配置开启
+        if [[ "$ENABLE_NEW_ZRAM" == "true" ]]; then
+            scripts/config --file out/.config \
+              -e CONFIG_ZRAM_BACKEND_LZ4K \
+              -e CONFIG_ZRAM_BACKEND_LZ4KD \
+              -e CONFIG_ZRAM_BACKEND_LZ4K_OPLUS \
+              -e CONFIG_ZRAM_MULTI_COMP \
+              -e CONFIG_ZRAM_BACKEND_LZO \
+              -e CONFIG_ZRAM_BACKEND_LZ4 \
+              -e CONFIG_ZRAM_BACKEND_LZ4HC \
+              -e CONFIG_ZRAM_BACKEND_ZSTD \
+              -e CONFIG_ZRAM_BACKEND_DEFLATE \
+              -e CONFIG_ZRAM_BACKEND_842 \
+              -e CONFIG_ZRAM_DEF_COMP_LZORLE \
+              -e CONFIG_ZRAM
+        fi
+
+        # 设置编译机器信息
+        KBUILD_BUILD_USER=build-user
+        KBUILD_BUILD_HOST=build-host
+        echo "检查core.c变动"
+        git diff kernel/sched/core.c
+
+        echo "[*] 正在编译 (启用 CCACHE 和 SWAP)..."
+        make LLVM=1 LLVM_IAS=1 ARCH=arm64 CC=clang HOSTCC=clang HOSTCXX=clang++ O=out LOCALVERSION=-$android_release-$kmi_generation -j$(nproc --all)
+        
+        ccache -s
+
+    - name: Pack Kernel (Prepare for Upload)
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace
+        
+        IMAGE_PATH="kernel_platform/common/out/arch/arm64/boot/Image"
+        if [[ ! -f "$IMAGE_PATH" ]]; then
+            echo "Error: Kernel Image not found at $IMAGE_PATH"
+            exit 1
+        fi
+        
+        echo "[*] Image found. Copying to AnyKernel3..."
+        
+        AK3_DIR="SukiSU_patch/AnyKernel3"
+        if [[ ! -d "$AK3_DIR" ]]; then
+            echo "Error: SukiSU_patch/AnyKernel3 directory not found!"
+            exit 1
+        fi
+        
+        cp "$IMAGE_PATH" "$AK3_DIR/"
+        
+        # 导出 AnyKernel3 目录路径
+        echo "AK3_UPLOAD_PATH=$GITHUB_WORKSPACE/kernel_workspace/$AK3_DIR" >> $GITHUB_ENV
+        echo "[*] Ready to upload raw AnyKernel3 directory."
+
+    - name: Upload Artifact (Simple Naming & Auto Zip)
+      uses: actions/upload-artifact@v4
+      with:
+        name: Anykernel3-ReSukiSU-${{ env.KSU_VERSION }}-OneplusAce3v${{ inputs.ENABLE_SUSFS && '-susfs' || '' }}-crd
+        path: ${{ env.AK3_UPLOAD_PATH }}
