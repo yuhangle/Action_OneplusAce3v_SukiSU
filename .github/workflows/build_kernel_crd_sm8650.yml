@@ -560,6 +560,10 @@ jobs:
         # 设置编译机器信息
         KBUILD_BUILD_USER=build-user
         KBUILD_BUILD_HOST=build-host
+        echo "检查core.c"
+        cat kernel/sched/core.c
+        echo "检查core.c变动"
+        git diff kernel/sched/core.c
 
         echo "[*] 正在编译 (启用 CCACHE 和 SWAP)..."
         make LLVM=1 LLVM_IAS=1 ARCH=arm64 CC=clang HOSTCC=clang HOSTCXX=clang++ O=out LOCALVERSION=-$android_release-$kmi_generation -j$(nproc --all)
