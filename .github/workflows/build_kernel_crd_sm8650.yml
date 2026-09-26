@@ -36,6 +36,14 @@ on:
         required: true
         default: false
         type: boolean
+      LLVM_CHOOSE:
+        description: '选择用于构建的工具链(不懂就保持默认)'
+        required: true
+        default: 'Zyc Clang23'
+        type: choice
+        options:
+          - 'Google官方工具链'
+          - 'Zyc Clang23'
 
 jobs:
   build:
@@ -110,41 +118,80 @@ jobs:
         chmod a+x ~/bin/repo
         echo "$HOME/bin" >> $GITHUB_PATH
 
-    - name: ⬇️ Download Google Clang Toolchain
-      # 步骤1：创建目录
+    - name: ⬇️ Download Clang Toolchain
+      env:
+        LLVM_CHOOSE: ${{ inputs.LLVM_CHOOSE || 'Google官方工具链' }}
       run: |
-        # 在 kernel_workspace 中创建 build-tools/clang 文件夹
+        set -e
+
+        # ============ 公共：创建目录 ============
         mkdir -p $GITHUB_WORKSPACE/kernel_workspace/build-tools/clang
         echo "Created directory: $GITHUB_WORKSPACE/kernel_workspace/build-tools/clang"
-
-        # 进入新创建的目录
         cd $GITHUB_WORKSPACE/kernel_workspace/build-tools/clang
-        
-        # 步骤2：克隆/下载 Clang 工具链
-        
-        CLANG_REPO="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86"
-        CLANG_REF="android-gs-akita-6.1-android16-dp"
-        
-        # 克隆仓库到临时目录
-        echo "Cloning Clang repo from $CLANG_REPO at ref $CLANG_REF"
-        git clone --depth 1 $CLANG_REPO -b $CLANG_REF temp_clang_repo
-        
-        # 将所需的工具链目录移动到正确位置
-        CLANG_BASE_PATH="$GITHUB_WORKSPACE/kernel_workspace/build-tools/clang/temp_clang_repo"
-        CLANG_DIR_NAME=$(find $CLANG_BASE_PATH -maxdepth 1 -type d -name "clang-r*" -exec basename {} \; | head -n 1)
-        
-        if [[ -z "$CLANG_DIR_NAME" ]]; then
-            echo "ERROR: Clang directory (clang-r*) not found in the downloaded repository."
+
+        # ============ 工具链选择 ============
+        case "$LLVM_CHOOSE" in
+          "Google官方工具链")
+            echo "🔧 使用 Google 官方工具链"
+
+            CLANG_REPO="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86"
+            CLANG_REF="android-gs-akita-6.1-android16-dp"
+
+            echo "Cloning Clang repo from $CLANG_REPO at ref $CLANG_REF"
+            git clone --depth 1 $CLANG_REPO -b $CLANG_REF temp_clang_repo
+
+            CLANG_BASE_PATH="$GITHUB_WORKSPACE/kernel_workspace/build-tools/clang/temp_clang_repo"
+            CLANG_DIR_NAME=$(find $CLANG_BASE_PATH -maxdepth 1 -type d -name "clang-r*" -exec basename {} \; | head -n 1)
+
+            if [[ -z "$CLANG_DIR_NAME" ]]; then
+                echo "ERROR: Clang directory (clang-r*) not found in the downloaded repository."
+                exit 1
+            fi
+
+            mv $CLANG_BASE_PATH/$CLANG_DIR_NAME .
+            rm -rf temp_clang_repo
+            echo "✅ Clang toolchain $CLANG_DIR_NAME downloaded and moved."
+            ;;
+
+          "Zyc Clang23")
+            echo "🔧 使用 Zyc Clang23 工具链"
+
+            ZYC_URL="https://github.com/ZyCromerZ/Clang/releases/download/23.0.0git-20260130-release/Clang-23.0.0git-20260130.tar.gz"
+            ZYC_TARBALL="Clang-23.0.0git-20260130.tar.gz"
+
+            echo "Downloading Zyc Clang from $ZYC_URL"
+            wget -q --show-progress -O "$ZYC_TARBALL" "$ZYC_URL"
+
+            echo "Extracting $ZYC_TARBALL ..."
+            tar -xzf "$ZYC_TARBALL"
+
+            # 解压后应得到 Clang-23.0.0git-20260130 目录
+            CLANG_DIR_NAME="Clang-23.0.0git-20260130"
+
+            if [[ ! -d "$CLANG_DIR_NAME" ]]; then
+                echo "ERROR: 解压后未找到目录 $CLANG_DIR_NAME"
+                ls -la
+                exit 1
+            fi
+
+            # 校验一下 bin 目录存在
+            if [[ ! -x "$CLANG_DIR_NAME/bin/clang" ]]; then
+                echo "ERROR: $CLANG_DIR_NAME/bin/clang 不存在或不可执行"
+                ls -la "$CLANG_DIR_NAME"
+                exit 1
+            fi
+
+            rm -f "$ZYC_TARBALL"
+            echo "✅ Clang toolchain $CLANG_DIR_NAME downloaded and extracted."
+            ;;
+
+          *)
+            echo "ERROR: 未知的 LLVM_CHOOSE 值: $LLVM_CHOOSE"
             exit 1
-        fi
-        
-        mv $CLANG_BASE_PATH/$CLANG_DIR_NAME . # 移动到 kernel_workspace/build-tools/clang/ 下
-        
-        # 清理临时克隆的仓库
-        rm -rf temp_clang_repo
-        echo "✅ Clang toolchain $CLANG_DIR_NAME downloaded and moved."
-        
-        # 步骤3：设置 CLANG_PATH 环境变量
+            ;;
+        esac
+
+        # ============ 公共：设置 CLANG_PATH ============
         CLANG_TOOLCHAIN_DIR="$GITHUB_WORKSPACE/kernel_workspace/build-tools/clang/$CLANG_DIR_NAME"
         echo "CLANG_PATH=$CLANG_TOOLCHAIN_DIR/bin" >> $GITHUB_ENV
         echo "✅ Set CLANG_PATH environment variable."
