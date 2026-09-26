@@ -343,6 +343,15 @@ jobs:
         git clone https://github.com/ShirkNeko/SukiSU_patch.git
         
         cd kernel_platform/common
+        
+        # 加入风驰内核补丁(在Crdroid上测试,可能有效果,配合手动调用,不保证有效)
+        if [[ "$ENABLE_FC" == "true" ]]; then
+            cp $PATCH_PATH/patch/fengchi/*.patch ./
+            echo "打多风驰内核移植补丁"
+            patch -p1 < 6.1-sched-ext-hmbird-fengchi.patch || true
+            echo "CONFIG_SLIM_SCHED=y" >> ./arch/arm64/configs/gki_defconfig
+            echo "CONFIG_SCHED_CLASS_EXT=y" >> ./arch/arm64/configs/gki_defconfig
+        fi
 
         # susfs补丁
         if [[ "$ENABLE_SUSFS" == "true" ]]; then
@@ -500,16 +509,6 @@ jobs:
             cp -r $PATCH_PATH/patch/zram/lz4kd_6.1_backend/files/* ./
             cp $PATCH_PATH/patch/zram/lz4kd_6.1_backend/*.patch ./
             patch -p1 < lz4kd-6.1-backend.patch || true
-        fi
-
-
-        # 加入风驰内核补丁(在Crdroid上测试,可能有效果,配合手动调用,不保证有效)
-        if [[ "$ENABLE_FC" == "true" ]]; then
-            cp $PATCH_PATH/patch/fengchi/*.patch ./
-            echo "打多风驰内核移植补丁"
-            patch -p1 < 6.1-sched-ext-hmbird-fengchi.patch || true
-            echo "CONFIG_SLIM_SCHED=y" >> ./arch/arm64/configs/gki_defconfig
-            echo "CONFIG_SCHED_CLASS_EXT=y" >> ./arch/arm64/configs/gki_defconfig
         fi
 
         echo "修复69_hide_stuff.patch引入编译错误"
