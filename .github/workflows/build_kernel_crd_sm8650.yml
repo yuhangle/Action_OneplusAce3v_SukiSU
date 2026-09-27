@@ -495,6 +495,8 @@ jobs:
             cp -r $PATCH_PATH/patch/zram/lz4kd_6.1_backend/files/* ./
             cp $PATCH_PATH/patch/zram/lz4kd_6.1_backend/*.patch ./
             patch -p1 < lz4kd-6.1-backend.patch || true
+            # 追加补丁中缺失的配置项
+            echo "CONFIG_ZRAM_MEMORY_TRACKING=y" >> ./arch/arm64/configs/gki_defconfig
         fi
 
         echo "修复69_hide_stuff.patch引入编译错误"
