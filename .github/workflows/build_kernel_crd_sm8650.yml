@@ -1,4 +1,4 @@
-name: Build Kernel ReSukiSU with crdroid sm8650 (OnePlus Ace 3V)
+name: Build Kernel BakaSU with crdroid sm8650 (OnePlus Ace 3V)
 
 on:
   workflow_dispatch:
@@ -321,10 +321,10 @@ jobs:
         cd ..
 
         # ------------------------------
-        # 集成 ReSukiSU
+        # 集成 BakaSU
         # ------------------------------
         cd kernel_platform
-        curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
+        curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/refs/heads/main/kernel/setup.sh" | bash
 
         # 提取 KSU 版本号并导出到环境变量
         cd KernelSU
@@ -564,5 +564,5 @@ jobs:
     - name: Upload Artifact (Simple Naming & Auto Zip)
       uses: actions/upload-artifact@v4
       with:
-        name: Anykernel3-ReSukiSU-${{ env.KSU_VERSION }}-OneplusAce3v${{ inputs.ENABLE_SUSFS && '-susfs' || '' }}-crd
+        name: Anykernel3-BakaSU-${{ env.KSU_VERSION }}-OneplusAce3v${{ inputs.ENABLE_SUSFS && '-susfs' || '' }}-crd
         path: ${{ env.AK3_UPLOAD_PATH }}

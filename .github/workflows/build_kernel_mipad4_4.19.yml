@@ -1,4 +1,4 @@
-name: Build Kernel ReSukiSU with 4.19 kernel (Mi Pad 4)
+name: Build Kernel BakaSU with 4.19 kernel (Mi Pad 4)
 
 on:
   workflow_dispatch:
@@ -170,7 +170,7 @@ jobs:
           fi
 
         
-    - name: Configure and Build 4.19 Kernel with ReSukiSU
+    - name: Configure and Build 4.19 Kernel with BakaSU
       env:
         KERNEL_DIR: ${{ github.workspace }}/kernel_workspace/common
         DROID_SPACES_ENABLED: ${{ inputs.DROID_SPACES_ENABLED }}
@@ -197,9 +197,9 @@ jobs:
         echo "[*] Applying clover config..."
         make O=out vendor/xiaomi/clover.config
 
-        echo "[*] Integrating ReSukiSU..."
+        echo "[*] Integrating BakaSU..."
         
-        curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
+        curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/refs/heads/main/kernel/setup.sh" | bash
 
         # 计算并导出 KSU 版本号
         cd KernelSU
@@ -240,7 +240,7 @@ jobs:
                 --enable KSU_SUSFS_SUS_MAP
         
         else
-            # 打ReSukiSU MANUAL_HOOK补丁
+            # 打BakaSU MANUAL_HOOK补丁
 
             curl -LSs "https://raw.githubusercontent.com/yuhangle/Action_OneplusAce3v_SukiSU/refs/heads/master/patch/ksu/sdm660_resuki.patch" -o sdm660_resuki.patch
             git apply ./sdm660_resuki.patch
@@ -393,7 +393,7 @@ jobs:
     - name: Upload AnyKernel3 Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: AnyKernel3-ReSukiSU-${{ env.KSU_VERSION }}-${{ inputs.ENABLE_SUSFS == true && 'susfs' || 'nosusfs' }}
+        name: AnyKernel3-BakaSU-${{ env.KSU_VERSION }}-${{ inputs.ENABLE_SUSFS == true && 'susfs' || 'nosusfs' }}
         path: ${{ env.AK3_UPLOAD_PATH }}
         if-no-files-found: error
 
