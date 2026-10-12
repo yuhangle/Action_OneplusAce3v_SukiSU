@@ -1,5 +1,5 @@
 diff --git a/fs/exec.c b/fs/exec.c
-index 02a112ad7892..b3ff7731f95a 100644
+index ebafadcd70e1..0fb53c4fc6aa 100644
 --- a/fs/exec.c
 +++ b/fs/exec.c
 @@ -1950,11 +1950,21 @@ static int __do_execve_file(int fd, struct filename *filename,
@@ -160,3 +160,34 @@ index d93fd1a98163..d48e633f6859 100644
  	[SEL_ACCESS] = sel_write_access,
  	[SEL_CREATE] = sel_write_create,
  	[SEL_RELABEL] = sel_write_relabel,
+diff --git a/security/selinux/ss/services.c b/security/selinux/ss/services.c
+index 04f9a1670a9d..e34a4360d9aa 100644
+--- a/security/selinux/ss/services.c
++++ b/security/selinux/ss/services.c
+@@ -94,7 +94,7 @@ static int context_struct_to_string(struct policydb *policydb,
+ 				    char **scontext,
+ 				    u32 *scontext_len);
+ 
+-static void context_struct_compute_av(struct policydb *policydb,
++void context_struct_compute_av(struct policydb *policydb,
+ 				      struct context *scontext,
+ 				      struct context *tcontext,
+ 				      u16 tclass,
+@@ -453,7 +453,7 @@ static int dump_masked_av_helper(void *k, void *d, void *args)
+ 	return 0;
+ }
+ 
+-static void security_dump_masked_av(struct policydb *policydb,
++void security_dump_masked_av(struct policydb *policydb,
+ 				    struct context *scontext,
+ 				    struct context *tcontext,
+ 				    u16 tclass,
+@@ -615,7 +615,7 @@ void services_compute_xperms_drivers(
+  * Compute access vectors and extended permissions based on a context
+  * structure pair for the permissions in a particular class.
+  */
+-static void context_struct_compute_av(struct policydb *policydb,
++void context_struct_compute_av(struct policydb *policydb,
+ 				      struct context *scontext,
+ 				      struct context *tcontext,
+ 				      u16 tclass,

@@ -17,6 +17,11 @@ on:
         required: true
         default: false
         type: boolean
+      BBG_ENABLED:
+        description: '是否加入BBG分区保护 (true/false)'
+        required: true
+        default: false
+        type: boolean
       ENABLE_SUSFS:
         description: '是否启用susfs (true/false)'
         required: true
@@ -35,11 +40,11 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    
+
     env:
       # CCACHE 配置 (4G 安全限制)
       CCACHE_DIR: ${{ github.workspace }}/.ccache_dir
-      CCACHE_MAXSIZE: 4G 
+      CCACHE_MAXSIZE: 4G
       CCACHE_NOHASHDIR: 'true'
       CCACHE_HARDLINK: 'true'
       CCACHE_COMPILERCHECK: '%compiler% -dumpmachine; %compiler% -dumpversion'
@@ -54,7 +59,7 @@ jobs:
         remove-android: 'true'
         remove-haskell: 'true'
         remove-codeql: 'true'
-        
+
     - name: Checkout Workflow
       uses: actions/checkout@v4
 
@@ -72,7 +77,7 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y libelf-dev libssl-dev flex bison cpio dwarves bc ccache
         sudo apt-get install -y git gnupg gperf build-essential zip curl zlib1g-dev gcc-multilib g++-multilib lib32ncurses5-dev x11proto-core-dev libx11-dev lib32z1-dev libgl1-mesa-dev unzip python3 python3-pip
-        
+
         git config --global user.name "GitHub Action"
         git config --global user.email "action@github.com"
 
@@ -159,8 +164,13 @@ jobs:
           git remote add origin \
             https://github.com/pix106/android_kernel_xiaomi_sdm660_southwest-ng.git
 
-          git fetch --depth=1 origin 0.17.3
-          git checkout -b 0.17.3 FETCH_HEAD
+          # 如果你是安卓16及以下，使用0.17.3才能开机
+          #git fetch --depth=1 origin 0.17.3
+          #git checkout -b 0.17.3 FETCH_HEAD
+
+          # 拉取main分支内核源码
+          git fetch --depth=1 origin main
+          git checkout -b main FETCH_HEAD
 
           echo "[*] 内核源码同步完成"
           echo "[*] 当前提交：$(git rev-parse HEAD)"
@@ -169,12 +179,13 @@ jobs:
           echo "[*] 源码缓存命中，跳过同步"
           fi
 
-        
+
     - name: Configure and Build 4.19 Kernel with BakaSU
       env:
         KERNEL_DIR: ${{ github.workspace }}/kernel_workspace/common
         DROID_SPACES_ENABLED: ${{ inputs.DROID_SPACES_ENABLED }}
         ENABLE_SUSFS: ${{ inputs.ENABLE_SUSFS }}
+        BBG_ENABLED: ${{ inputs.BBG_ENABLED }}
       run: |
         set -euo pipefail
 
@@ -198,7 +209,7 @@ jobs:
         make O=out vendor/xiaomi/clover.config
 
         echo "[*] Integrating BakaSU..."
-        
+
         curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/refs/heads/main/kernel/setup.sh" | bash
 
         # 计算并导出 KSU 版本号
@@ -220,8 +231,8 @@ jobs:
             bash susfs_inline_hook_patches.sh ./
 
             # 打上符号导出需要的补丁
-            wget https://raw.githubusercontent.com/yuhangle/Action_OneplusAce3v_SukiSU/refs/heads/master/patch/ksu/sdm660_resuki_selinux.patch
-            patch -p1 < ./sdm660_resuki_selinux.patch
+            wget https://raw.githubusercontent.com/yuhangle/Action_OneplusAce3v_SukiSU/refs/heads/master/patch/ksu/sdm660_bakasu_selinux.patch
+            patch -p1 < ./sdm660_bakasu_selinux.patch
 
             # SUSFS配置
             scripts/config --file out/.config \
@@ -238,12 +249,12 @@ jobs:
                 --disable KSU_TRACEPOINT_HOOK \
                 --disable KSU_MANUAL_HOOK \
                 --enable KSU_SUSFS_SUS_MAP
-        
+
         else
             # 打BakaSU MANUAL_HOOK补丁
 
-            curl -LSs "https://raw.githubusercontent.com/yuhangle/Action_OneplusAce3v_SukiSU/refs/heads/master/patch/ksu/sdm660_resuki.patch" -o sdm660_resuki.patch
-            git apply ./sdm660_resuki.patch
+            curl -LSs "https://raw.githubusercontent.com/yuhangle/Action_OneplusAce3v_SukiSU/refs/heads/master/patch/ksu/sdm660_bakasu.patch" -o sdm660_bakasu.patch
+            git apply ./sdm660_bakasu.patch
 
             echo "[*] Applying KSU configuration..."
             scripts/config --file out/.config \
@@ -319,6 +330,16 @@ jobs:
             patch -p1 -F3 < ./"02.fix_restore cgroup file prefix handling .patch"
         fi
 
+        if [[ "$BBG_ENABLED" == "true" ]]; then
+            # 加入BBG
+            echo "下载并运行 Baseband-guard setup 脚本..."
+            scripts/config --file out/.config \
+                --enable BBG
+            # 显式设置 LSM 链，加入 baseband_guard
+            scripts/config --file out/.config --set-str CONFIG_LSM "lockdown,baseband_guard,yama,selinux"
+            wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
+        fi
+
         echo "[*] Synchronizing kernel configuration..."
         make LLVM=1 LLVM_IAS=1 ARCH=arm64 \
             CC="ccache clang" \
@@ -328,7 +349,7 @@ jobs:
 
         echo "[*] Checking KSU configuration..."
         grep -E 'CONFIG_KSU|CONFIG_KALLSYMS' out/.config || true
-        
+
         echo "[*] Build Kernel"
 
         make LLVM=1 LLVM_IAS=1 ARCH=arm64 \
@@ -396,4 +417,3 @@ jobs:
         name: AnyKernel3-BakaSU-${{ env.KSU_VERSION }}-${{ inputs.ENABLE_SUSFS == true && 'susfs' || 'nosusfs' }}
         path: ${{ env.AK3_UPLOAD_PATH }}
         if-no-files-found: error
-
